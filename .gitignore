@@ -1,0 +1,12 @@
+# backend/.gitignore
+# This tells Git to ignore files we don't want to upload.
+
+# Python virtual environment
+venv/
+
+# Environment variables file
+.env
+
+# Python cache
+__pycache__/
+*.pyc
