@@ -106,7 +106,12 @@ async def create_user(user: UserCreate):
             )
             if new_user_record is None:
                 raise HTTPException(status_code=500, detail= "failed to create user.")
-            return User.model_validate(new_user_record)     #database to pydantic model 
+            return User(
+                user_id=new_user_record['user_id'],
+                name=new_user_record['name'],
+                email=new_user_record['email'],
+                role=new_user_record['role']
+            ) 
         
         #checking if the email is used or not
         except asyncpg.exceptions.UniqueViolationError:
