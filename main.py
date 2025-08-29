@@ -80,38 +80,74 @@ async def test_db_connection():
 async def create_user(user: UserCreate):
     hashed_password= get_password_hash(user.password)
     
-    sql_query= """
-    INSERT INTO "User" (name, email, password, role)
-    VALUES ($1, $2, $3, $4)
+    # SQL queries for user and role-specific table insertion
+    user_sql_query= """
+    INSERT INTO "User" (user_id, name, email, password, role)
+    VALUES ($1, $2, $3, $4, $5)
     RETURNING user_id, name, email, role;
     """
     
+    # Role-specific table insertion queries
+    role_sql_queries = {
+        'student': 'INSERT INTO "Student" (user_id) VALUES ($1)',
+        'faculty': 'INSERT INTO "Faculty" (user_id) VALUES ($1)',
+        'admin': 'INSERT INTO "Admin" (user_id) VALUES ($1)'
+    }
+    
     async with DatabasePool.acquire() as connection:
-        # checking if exist
-        existing_user = await connection.fetchrow('select user_id from "User" where email = $1', user.email)
-        if existing_user:
+        # Check if user_id already exists
+        existing_user_id = await connection.fetchrow('SELECT user_id FROM "User" WHERE user_id = $1', user.user_id)
+        if existing_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User ID already exists. Please use a different ID."
+            )
+        
+        # Check if email already exists
+        existing_email = await connection.fetchrow('SELECT user_id FROM "User" WHERE email = $1', user.email)
+        if existing_email:
             raise HTTPException(
                 status_code= status.HTTP_400_BAD_REQUEST,
                 detail = "Email already registered. Try to login."
             )
         
-        # New user
-        try:
-            new_user_record = await connection.fetchrow(
-                sql_query,
-                user.name,
-                user.email,
-                hashed_password,
-                user.role
+        # Validate role
+        if user.role not in role_sql_queries:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid role. Must be one of: {', '.join(role_sql_queries.keys())}"
             )
-            if new_user_record is None:
-                raise HTTPException(status_code=500, detail= "failed to create user.")
-            return User(
-                user_id=new_user_record['user_id'],
-                name=new_user_record['name'],
-                email=new_user_record['email'],
-                role=new_user_record['role']
-            ) 
+        
+        # New user with transaction for data consistency
+        try:
+            # Start transaction
+            async with connection.transaction():
+                # Insert into User table
+                new_user_record = await connection.fetchrow(
+                    user_sql_query,
+                    user.user_id,
+        
+                    user.name,
+                    user.email,
+                    hashed_password,
+                    user.role
+                )
+                
+                if new_user_record is None:
+                    raise HTTPException(status_code=500, detail= "failed to create user.")
+                
+                # Insert into role-specific table
+                await connection.execute(
+                    role_sql_queries[user.role],
+                    new_user_record['user_id']
+                )
+                
+                return User(
+                    user_id=new_user_record['user_id'],
+                    name=new_user_record['name'],
+                    email=new_user_record['email'],
+                    role=new_user_record['role']
+                )
         
         #checking if the email is used or not
         except asyncpg.exceptions.UniqueViolationError:
