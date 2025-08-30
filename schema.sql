@@ -76,6 +76,7 @@ CREATE TABLE "Announcement" (
   FOREIGN KEY ("section_course_code", "section_sec_number") REFERENCES "Section"("course_code", "sec_number")
 );
 
+-- Grade table
 CREATE TABLE "Grade" (
   "student_id" INT,
   "course_code" VARCHAR(50),
@@ -87,6 +88,7 @@ CREATE TABLE "Grade" (
   FOREIGN KEY ("course_code", "sec_number") REFERENCES "Section"("course_code", "sec_number")
 );
 
+-- Todo table
 CREATE TABLE "Todo" (
   "user_id" INT,
   "todo_id" SERIAL,
@@ -97,4 +99,18 @@ CREATE TABLE "Todo" (
   PRIMARY KEY ("user_id", "todo_id"),
   FOREIGN KEY ("user_id") REFERENCES "User"("user_id"),
   FOREIGN KEY ("related_announcement") REFERENCES "Announcement"("announcement_id")
+);
+
+-- Leaderboard table
+CREATE TABLE "Leaderboard" (
+  "leaderboard_id" SERIAL PRIMARY KEY,
+  "course_code" VARCHAR(50),
+  "student_id" INT,
+  "total_points" INT DEFAULT 0,
+  "is_anonymous" BOOLEAN DEFAULT FALSE,
+  "anonymous_name" VARCHAR(100),
+  "last_updated" TIMESTAMPTZ DEFAULT NOW(),
+  FOREIGN KEY ("course_code") REFERENCES "Course"("course_code"),
+  FOREIGN KEY ("student_id") REFERENCES "Student"("user_id"),
+  UNIQUE("course_code", "student_id")
 );
