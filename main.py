@@ -202,7 +202,7 @@ async def login_user(user: UserLogin):
 # ======= Admin Course ADD API ======= 
 
 @app.post("/courses", response_model= Course, status_code=status.HTTP_201_CREATED)
-async def create_course(course: CourseCreate, admin_id: int = Depends(RoleChecker)):
+async def create_course(course: CourseCreate, admin_id: int = Depends(RoleChecker(["admin"]))):
     sql = 'INSERT INTO "Course" (course_code, course_name) VALUES ($1, $2) RETURNING *;'
     async with DatabasePool.acquire() as conn:
         try:
@@ -214,7 +214,7 @@ async def create_course(course: CourseCreate, admin_id: int = Depends(RoleChecke
 # ======= Admin Section ADD API =======
 
 @app.post("/courses/{course_code}/sections", response_model = Section, status_code= status.HTTP_201_CREATED)
-async def create_section_for_course(course_code: str, section: SectionCreate, admin_id: int = Depends(RoleChecker)):
+async def create_section_for_course(course_code: str, section: SectionCreate, admin_id: int = Depends(RoleChecker(["admin"]))):
     sql = """
         INSERT INTO "Section" (course_code, sec_number, start_time, end_time, day_of_week, location)
         VALUES ($1, $2, $3, $4, $5, $6)
@@ -244,3 +244,19 @@ async def get_course_sections(course_code: str):
         if not records:
             raise HTTPException(status_code=404, detail=f"No section found for for course '{course_code}'.")
         return [Section.model_validate(record) for record in records]
+
+@app.post("/faculty/assign-section", response_model=FacultySection, status_code=status.HTTP_201_CREATED)
+async def assign_faculty_to_section(assignment: FacultySectionAssign, faculty_id: int= Depends(RoleChecker(["faculty"]))):
+    sql = """
+        INSERT INTO "Faculty_Section" (faculty_id, course_code, sec_number)
+        VALUES ($1, $2, $3)
+        RETURNING *;
+    """
+    async with DatabasePool.acquire() as conn:
+        try:
+            record = await conn.fetchrow(sql, faculty_id, assignment.course_code, assignment.sec_number)
+            return FacultySection.model_validate(record)
+        except asyncpg.exceptions.UniqueViolationError:
+            raise HTTPException(status_code=400, detail="Faculty member is already assigned to this section.")
+        except asyncpg.exceptions.ForeignKeyViolationError:
+            raise HTTPException(status_code=404, detail="The specified course code or section number does not exist.")
