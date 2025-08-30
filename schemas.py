@@ -1,9 +1,10 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, json_schema
 #Pydantic model for data validations.
 
 class UserCreate(BaseModel):
     # Creating User by pydantic model
-    name: str = Field(..., min_lenght=3)
+    user_id: int = Field(..., gt=0, description="Student ID, Employee ID, or Admin ID (positive integer)")
+    name: str = Field(..., min_length=3)
     email: EmailStr
     password: str = Field(..., min_length=8)
     role: str
@@ -12,12 +13,16 @@ class UserCreate(BaseModel):
         # Provides an example for the API documentation
         json_schema_extra = {
             "example": {
+                "user_id": 2024001,
                 "name": "John Doe",
                 "email": "john.doe@example.com",
                 "password": "a_strong_password",
                 "role": "student"
             }
         }
+class UserLogin(BaseModel):
+    user_id: int = Field(..., gt=0, description="Student ID, Employee ID, or Admin ID (positive integer)")
+    password: str = Field(..., min_length=8)
 
 class User (BaseModel):
     # Formal representation of a User without password
@@ -29,4 +34,12 @@ class User (BaseModel):
     
     class Config:
         from_attributes = True
+        json_schema_extra = {
+            "example": {
+                "user_id": 2024001,
+                "name": "John Doe",
+                "email": "john.doe@example.com",
+                "role": "student"
+            }
+        }
         # This allows the model to be created from database records
