@@ -17,7 +17,8 @@ class UserCreate(BaseModel):
                 "name": "John Doe",
                 "email": "john.doe@example.com",
                 "password": "a_strong_password",
-                "role": "student"
+                "role": "student",
+                "preferred_anonymous_name": "John Doe"
             }
         }
 class UserLogin(BaseModel):
@@ -39,7 +40,8 @@ class User (BaseModel):
                 "user_id": 2024001,
                 "name": "John Doe",
                 "email": "john.doe@example.com",
-                "role": "student"
+                "role": "student",
+                "preferred_anonymous_name": "John Doe"
             }
         }
         # This allows the model to be created from database records

@@ -82,8 +82,8 @@ async def create_user(user: UserCreate):
     
     # SQL queries for user and role-specific table insertion
     user_sql_query= """
-    INSERT INTO "User" (user_id, name, email, password, role)
-    VALUES ($1, $2, $3, $4, $5)
+    INSERT INTO "User" (user_id, name, email, password, role, preferred_anonymous_name)
+    VALUES ($1, $2, $3, $4, $5, $6)
     RETURNING user_id, name, email, role;
     """
     
@@ -126,11 +126,11 @@ async def create_user(user: UserCreate):
                 new_user_record = await connection.fetchrow(
                     user_sql_query,
                     user.user_id,
-        
                     user.name,
                     user.email,
                     hashed_password,
-                    user.role
+                    user.role,
+                    user.preferred_anonymous_name
                 )
                 
                 if new_user_record is None:
@@ -146,7 +146,8 @@ async def create_user(user: UserCreate):
                     user_id=new_user_record['user_id'],
                     name=new_user_record['name'],
                     email=new_user_record['email'],
-                    role=new_user_record['role']
+                    role=new_user_record['role'],
+                    preferred_anonymous_name=new_user_record['preferred_anonymous_name']
                 )
         
         #checking if the email is used or not
