@@ -2,10 +2,11 @@ import os
 import asyncpg
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
-from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate
+from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign
+from typing import List
 
 # ======= SetUp ======= 
 
@@ -58,6 +59,28 @@ def verify_password(main_password, hashed_password):
 
 def get_password_hash(password):
     return pwd_context.hash(password)
+
+
+# ======= API Auth ======= 
+
+class RoleChecker:
+    def __init__(self, allowed_roles: List[str]):
+        self.allowed_roles= allowed_roles
+    
+    async def __call__ (self, x_user_id, int = Header(...)):
+        if not DatabasePool:
+            raise HTTPException(status_code=503, detail="Database connection not available")
+        
+        async with DatabasePool.acquire() as conn:
+            user = await conn.fetchrow('SELECT role FROM "User" WHERE user_id = $1', x_user_id)
+        
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail= f"User with ID {x_user_id} not found.")
+        
+        if user['role'] not in self.allowed_roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"This action requires one of the following roles: {', '.join(self.allowed_roles)}.")
+        
+        return x_user_id
 
 # ======= API ======= 
 
@@ -179,7 +202,7 @@ async def login_user(user: UserLogin):
 # ======= Admin Course ADD API ======= 
 
 @app.post("/courses", response_model= Course, status_code=status.HTTP_201_CREATED)
-async def create_course(course: CourseCreate, admin_id: int = Depends(verify_admin_role)):
+async def create_course(course: CourseCreate, admin_id: int = Depends(RoleChecker)):
     sql = 'INSERT INTO "Course" (course_code, course_name) VALUES ($1, $2) RETURNING *;'
     async with DatabasePool.acquire() as conn:
         try:
@@ -191,7 +214,7 @@ async def create_course(course: CourseCreate, admin_id: int = Depends(verify_adm
 # ======= Admin Section ADD API =======
 
 @app.post("/courses/{course_code}/sections", response_model = Section, status_code= status.HTTP_201_CREATED)
-async def create_section_for_course(course_code: str, section: SectionCreate, admin_id: int = Depends(verify_admin_role)):
+async def create_section_for_course(course_code: str, section: SectionCreate, admin_id: int = Depends(RoleChecker)):
     sql = """
         INSERT INTO "Section" (course_code, sec_number, start_time, end_time, day_of_week, location)
         VALUES ($1, $2, $3, $4, $5, $6)
@@ -205,3 +228,19 @@ async def create_section_for_course(course_code: str, section: SectionCreate, ad
             record = await conn.fetchrow(sql, course_code, section.sec_number, section.start_time, section.end_time, section.day_of_week, section.location)
         except asyncpg.exceptions.UniqueViolationError:
             raise HTTPException(status_code= 400, detail=f"Section {section.sec_number} for course '{course_code}' already exists.")
+
+
+
+@app.get("/courses", response_model=List[Course])
+async def get_all_courses():
+    async with DatabasePool.acquire() as conn:
+        records= await conn.fetch('select * from "Courses";')
+        return[Course.model_validation(record) for record in records]
+
+@app.get('/courses/{course_code}/sections', response_model=List[Section])
+async def get_course_sections(course_code: str):
+    async with DatabasePool.acquire() as conn:
+        records= await conn.fetch('select * from "Section" where course_code = $1;', course_code)
+        if not records:
+            raise HTTPException(status_code=404, detail=f"No section found for for course '{course_code}'.")
+        return [Section.model_validate(record) for record in records]

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field, json_schema
-from typing import Optional
+from typing import Optional, List
 import datetime
 #Pydantic model for data validations.
 
@@ -58,6 +58,10 @@ class SectionBase(BaseModel):
 class SectionCreate(SectionBase):
     pass
 
+class Section(SectionBase):
+    course_code: str
+    class config:
+        from_attributes= True
 class CourseBase(BaseModel):
     course_code: str = Field(..., max_length=8)
     course_name: str = Field(..., max_length=255)
@@ -69,6 +73,13 @@ class Course(CourseBase):
     class config:
         from_attributes = True
 
-class Section(SectionBase):
+class FacultySectionAssign(BaseModel):
+    course_code: str
+    sec_number: int
+
+class FacultySection(BaseModel):
+    faculty_id: int
+    course_code: str
+    sec_number: int
     class config:
         from_attributes= True
