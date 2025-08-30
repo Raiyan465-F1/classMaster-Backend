@@ -16,24 +16,62 @@ load_dotenv()
 
 pwd_context = CryptContext(schemes= ['bcrypt'], deprecated= 'auto')
 
-# ======= Database Connection Pool ======= 
+# ======= ADMIN CREDENTIALS =======
 
+# The user_id is what you will use in the X-User-ID header.
+ADMIN_ID = 1
+ADMIN_NAME = "Super Admin"
+ADMIN_EMAIL = "admin@classmaster.com"
+ADMIN_PASSWORD = "change_this_secret_password"
+
+# ======= Database Connection Pool ======= 
 DatabasePool= None
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+app = FastAPI()
+
+# --- STARTUP AND SHUTDOWN LOGIC ---
+
+@app.on_event("startup")
+async def startup_event():
+    """This function will run once when the application starts."""
     global DatabasePool
     print("Info :    Entering the world of NeonDB... ")
-    try:
-        DatabasePool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
-        print("INFO :    Welcome to the World of NeonDB. Connection successful.")
-        yield
-    finally:
-        if DatabasePool:
-            print("INFO:   Disconnecting the World...  ")
-            await DatabasePool.close()
+    DatabasePool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
+    print("INFO :    Welcome to the World of NeonDB. Connection successful.")
+    await upsert_admin() # Ensure admin exists after pool is created
 
-app = FastAPI(lifespan= lifespan)
+@app.on_event("shutdown")
+async def shutdown_event():
+    """This function will run once when the application shuts down."""
+    if DatabasePool:
+        print("INFO:   Disconnecting the World...  ")
+        await DatabasePool.close()
+
+
+async def upsert_admin():
+    """On startup, create or update the hardcoded admin user in both User and Admin tables."""
+    # This is our proof that the function is running.
+    print("\n\n--- 🚀 EXECUTING UPSERT ADMIN FUNCTION! 🚀 ---\n")
+
+    hashed_password = get_password_hash(ADMIN_PASSWORD)
+    user_sql = """
+        INSERT INTO "User" (user_id, name, email, password, role)
+        VALUES ($1, $2, $3, $4, 'admin')
+        ON CONFLICT (user_id) DO UPDATE SET
+            name = EXCLUDED.name, 
+            email = EXCLUDED.email,
+            password = EXCLUDED.password, 
+            role = EXCLUDED.role;
+    """
+    admin_sql = 'INSERT INTO "Admin" (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING'
+
+    # We must use the global DatabasePool here now
+    async with DatabasePool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(user_sql, ADMIN_ID, ADMIN_NAME, ADMIN_EMAIL, hashed_password)
+            await conn.execute(admin_sql, ADMIN_ID)
+            
+    print(f"--- ✅ UPSERT ADMIN COMPLETE! User '{ADMIN_NAME}' (ID: {ADMIN_ID}) should be in the DB. ---\n")
 
 # ======= CORS Middleware ======= 
 
@@ -67,7 +105,7 @@ class RoleChecker:
     def __init__(self, allowed_roles: List[str]):
         self.allowed_roles= allowed_roles
     
-    async def __call__ (self, x_user_id, int = Header(...)):
+    async def __call__ (self, x_user_id: int = Header(..., alias= "X-User_ID")):
         if not DatabasePool:
             raise HTTPException(status_code=503, detail="Database connection not available")
         
@@ -192,7 +230,7 @@ async def login_user(user: UserLogin):
         if user_record is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
         if not verify_password(user.password, user_record['password']):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password")
         return User(
             user_id=user_record['user_id'],
             name=user_record['name'],
@@ -207,7 +245,7 @@ async def create_course(course: CourseCreate, admin_id: int = Depends(RoleChecke
     async with DatabasePool.acquire() as conn:
         try:
             record = await conn.fetchrow (sql, course.course_code, course.course_name)
-            return Course.model_validation(record)
+            return Course.model_validate(dict(record))
         except asyncpg.exceptions.UniqueViolationError:
                 raise HTTPException(status_code=400, detail= f"Course '{course.course_code}' already exists.")
 
@@ -226,16 +264,17 @@ async def create_section_for_course(course_code: str, section: SectionCreate, ad
             raise HTTPException(status_code= 404, detail= f"Course '{course_code}' not found.")
         try:
             record = await conn.fetchrow(sql, course_code, section.sec_number, section.start_time, section.end_time, section.day_of_week, section.location)
+            return Section.model_validate(dict(record))
         except asyncpg.exceptions.UniqueViolationError:
             raise HTTPException(status_code= 400, detail=f"Section {section.sec_number} for course '{course_code}' already exists.")
 
-
+# ======= Global Course and Section showing API =======
 
 @app.get("/courses", response_model=List[Course])
 async def get_all_courses():
     async with DatabasePool.acquire() as conn:
-        records= await conn.fetch('select * from "Courses";')
-        return[Course.model_validation(record) for record in records]
+        records= await conn.fetch('select * from "Course";')
+        return[Course.model_validate(dict(record)) for record in records]
 
 @app.get('/courses/{course_code}/sections', response_model=List[Section])
 async def get_course_sections(course_code: str):
@@ -243,7 +282,9 @@ async def get_course_sections(course_code: str):
         records= await conn.fetch('select * from "Section" where course_code = $1;', course_code)
         if not records:
             raise HTTPException(status_code=404, detail=f"No section found for for course '{course_code}'.")
-        return [Section.model_validate(record) for record in records]
+        return [Section.model_validate(dict(record)) for record in records]
+
+# ======= Faculty Course+Section ADD API =======
 
 @app.post("/faculty/assign-section", response_model=FacultySection, status_code=status.HTTP_201_CREATED)
 async def assign_faculty_to_section(assignment: FacultySectionAssign, faculty_id: int= Depends(RoleChecker(["faculty"]))):
@@ -255,7 +296,7 @@ async def assign_faculty_to_section(assignment: FacultySectionAssign, faculty_id
     async with DatabasePool.acquire() as conn:
         try:
             record = await conn.fetchrow(sql, faculty_id, assignment.course_code, assignment.sec_number)
-            return FacultySection.model_validate(record)
+            return FacultySection.model_validate(dict(record))
         except asyncpg.exceptions.UniqueViolationError:
             raise HTTPException(status_code=400, detail="Faculty member is already assigned to this section.")
         except asyncpg.exceptions.ForeignKeyViolationError:

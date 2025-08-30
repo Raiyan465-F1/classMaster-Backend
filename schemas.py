@@ -1,15 +1,19 @@
 from pydantic import BaseModel, EmailStr, Field, json_schema
 from typing import Optional, List
 import datetime
+from enum import Enum
 #Pydantic model for data validations.
 
+class RegisterableRole(str, Enum):
+    student= "student"
+    faculty= "faculty"
 class UserCreate(BaseModel):
     # Creating User by pydantic model
-    user_id: int = Field(..., gt=0, description="Student ID, Employee ID, or Admin ID (positive integer)")
+    user_id: int = Field(..., gt=0, description="Student ID, Employee ID (positive integer)")
     name: str = Field(..., min_length=3)
     email: EmailStr
     password: str = Field(..., min_length=8)
-    role: str
+    role: RegisterableRole # This ensures only 'student' or 'faculty' can be chosen
     preferred_anonymous_name: Optional[str] = Field(None, min_length=3, description="optional for students")
 
     class Config:
