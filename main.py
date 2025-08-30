@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
-from schemas import User, UserCreate, UserLogin
+from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate
 
 # ======= SetUp ======= 
 
@@ -37,9 +37,6 @@ app = FastAPI(lifespan= lifespan)
 # ======= CORS Middleware ======= 
 
 origin = [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://localhost:3002",
     "http://localhost",
     "http://127.0.0.1",
     "http://127.0.0.1:5500", # port for live server extensions
@@ -79,6 +76,8 @@ async def test_db_connection():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database query failed: {e}") 
 
+# ======= Register API ======= 
+
 @app.post('/register', response_model=User, status_code=status.HTTP_201_CREATED)
 async def create_user(user: UserCreate):
     hashed_password= get_password_hash(user.password)
@@ -92,7 +91,7 @@ async def create_user(user: UserCreate):
     
     # Role-specific table insertion queries
     role_sql_queries = {
-        'student': 'INSERT INTO "Student" (user_id, preferred_anonymous_name) VALUES ($1, $2)',
+        'student': 'INSERT INTO "Student" (user_id) VALUES ($1)',
         'faculty': 'INSERT INTO "Faculty" (user_id) VALUES ($1)',
         'admin': 'INSERT INTO "Admin" (user_id) VALUES ($1)'
     }
@@ -121,13 +120,6 @@ async def create_user(user: UserCreate):
                 detail=f"Invalid role. Must be one of: {', '.join(role_sql_queries.keys())}"
             )
         
-        # Validate that students provide preferred_anonymous_name
-        if user.role == 'student' and not user.preferred_anonymous_name:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="preferred_anonymous_name is required for students"
-            )
-        
         # New user with transaction for data consistency
         try:
             # Start transaction
@@ -136,6 +128,7 @@ async def create_user(user: UserCreate):
                 new_user_record = await connection.fetchrow(
                     user_sql_query,
                     user.user_id,
+        
                     user.name,
                     user.email,
                     hashed_password,
@@ -146,17 +139,10 @@ async def create_user(user: UserCreate):
                     raise HTTPException(status_code=500, detail= "failed to create user.")
                 
                 # Insert into role-specific table
-                if user.role == 'student':
-                    await connection.execute(
-                        role_sql_queries[user.role],
-                        new_user_record['user_id'],
-                        user.preferred_anonymous_name
-                    )
-                else:
-                    await connection.execute(
-                        role_sql_queries[user.role],
-                        new_user_record['user_id']
-                    )
+                await connection.execute(
+                    role_sql_queries[user.role],
+                    new_user_record['user_id']
+                )
                 
                 return User(
                     user_id=new_user_record['user_id'],
@@ -174,6 +160,7 @@ async def create_user(user: UserCreate):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"An error occurred: {e}")\
 
+# ======= Login API ======= 
 
 @app.post('/login', response_model=User, status_code=status.HTTP_200_OK)
 async def login_user(user: UserLogin):
@@ -188,3 +175,33 @@ async def login_user(user: UserLogin):
             name=user_record['name'],
             email=user_record['email'],
             role=user_record['role'])
+
+# ======= Admin Course ADD API ======= 
+
+@app.post("/courses", response_model= Course, status_code=status.HTTP_201_CREATED)
+async def create_course(course: CourseCreate, admin_id: int = Depends(verify_admin_role)):
+    sql = 'INSERT INTO "Course" (course_code, course_name) VALUES ($1, $2) RETURNING *;'
+    async with DatabasePool.acquire() as conn:
+        try:
+            record = await conn.fetchrow (sql, course.course_code, course.course_name)
+            return Course.model_validation(record)
+        except asyncpg.exceptions.UniqueViolationError:
+                raise HTTPException(status_code=400, detail= f"Course '{course.course_code}' already exists.")
+
+# ======= Admin Section ADD API =======
+
+@app.post("/courses/{course_code}/sections", response_model = Section, status_code= status.HTTP_201_CREATED)
+async def create_section_for_course(course_code: str, section: SectionCreate, admin_id: int = Depends(verify_admin_role)):
+    sql = """
+        INSERT INTO "Section" (course_code, sec_number, start_time, end_time, day_of_week, location)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING *;
+    """
+    async with DatabasePool.acquire() as conn:
+        course_exists= await conn.fetchval('SELECT 1 FROM "Course" WHERE course_code = $1', course_code)
+        if not course_exists:
+            raise HTTPException(status_code= 404, detail= f"Course '{course_code}' not found.")
+        try:
+            record = await conn.fetchrow(sql, course_code, section.sec_number, section.start_time, section.end_time, section.day_of_week, section.location)
+        except asyncpg.exceptions.UniqueViolationError:
+            raise HTTPException(status_code= 400, detail=f"Section {section.sec_number} for course '{course_code}' already exists.")
