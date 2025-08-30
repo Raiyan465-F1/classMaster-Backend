@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
-from schemas import User, UserCreate
+from schemas import User, UserCreate, UserLogin
 
 # ======= SetUp ======= 
 
@@ -156,5 +156,19 @@ async def create_user(user: UserCreate):
                 detail= "Email already registered. Try to login."
             )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
-        
+            raise HTTPException(status_code=500, detail=f"An error occurred: {e}")\
+
+
+@app.post('/login', response_model=User, status_code=status.HTTP_200_OK)
+async def login_user(user: UserLogin):
+    async with DatabasePool.acquire() as connection:
+        user_record = await connection.fetchrow('SELECT user_id, name, email, role, password FROM "User" WHERE user_id = $1', user.user_id)
+        if user_record is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        if not verify_password(user.password, user_record['password']):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        return User(
+            user_id=user_record['user_id'],
+            name=user_record['name'],
+            email=user_record['email'],
+            role=user_record['role'])
