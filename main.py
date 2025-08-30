@@ -37,6 +37,9 @@ app = FastAPI(lifespan= lifespan)
 # ======= CORS Middleware ======= 
 
 origin = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
     "http://localhost",
     "http://127.0.0.1",
     "http://127.0.0.1:5500", # port for live server extensions
