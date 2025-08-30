@@ -114,3 +114,6 @@ CREATE TABLE "Leaderboard" (
   FOREIGN KEY ("student_id") REFERENCES "Student"("user_id"),
   UNIQUE("course_code", "student_id")
 );
+
+ALTER TABLE "Student" 
+ADD COLUMN "preferred_anonymous_name" VARCHAR(100);
