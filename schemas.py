@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field, json_schema
 from typing import Optional
+import datetime
 #Pydantic model for data validations.
 
 class UserCreate(BaseModel):
@@ -46,3 +47,28 @@ class User (BaseModel):
             }
         }
         # This allows the model to be created from database records
+
+class SectionBase(BaseModel):
+    sec_number: int
+    start_time: datetime.time
+    end_time: datetime.time
+    day_of_week: str
+    location: str
+
+class SectionCreate(SectionBase):
+    pass
+
+class CourseBase(BaseModel):
+    course_code: str = Field(..., max_length=8)
+    course_name: str = Field(..., max_length=255)
+
+class CourseCreate(CourseBase):
+    pass
+
+class Course(CourseBase):
+    class config:
+        from_attributes = True
+
+class Section(SectionBase):
+    class config:
+        from_attributes= True
