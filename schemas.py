@@ -1,4 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field, json_schema
+from typing import Optional
 #Pydantic model for data validations.
 
 class UserCreate(BaseModel):
@@ -8,6 +9,7 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8)
     role: str
+    preferred_anonymous_name: Optional[str] = Field(None, min_length=3, description="optional for students")
 
     class Config:
         # Provides an example for the API documentation
@@ -40,8 +42,7 @@ class User (BaseModel):
                 "user_id": 2024001,
                 "name": "John Doe",
                 "email": "john.doe@example.com",
-                "role": "student",
-                "preferred_anonymous_name": "John Doe"
+                "role": "student"
             }
         }
         # This allows the model to be created from database records

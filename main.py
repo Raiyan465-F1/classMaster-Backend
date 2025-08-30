@@ -82,14 +82,14 @@ async def create_user(user: UserCreate):
     
     # SQL queries for user and role-specific table insertion
     user_sql_query= """
-    INSERT INTO "User" (user_id, name, email, password, role, preferred_anonymous_name)
-    VALUES ($1, $2, $3, $4, $5, $6)
+    INSERT INTO "User" (user_id, name, email, password, role)
+    VALUES ($1, $2, $3, $4, $5)
     RETURNING user_id, name, email, role;
     """
     
     # Role-specific table insertion queries
     role_sql_queries = {
-        'student': 'INSERT INTO "Student" (user_id) VALUES ($1)',
+        'student': 'INSERT INTO "Student" (user_id, preferred_anonymous_name) VALUES ($1, $2)',
         'faculty': 'INSERT INTO "Faculty" (user_id) VALUES ($1)',
         'admin': 'INSERT INTO "Admin" (user_id) VALUES ($1)'
     }
@@ -118,6 +118,13 @@ async def create_user(user: UserCreate):
                 detail=f"Invalid role. Must be one of: {', '.join(role_sql_queries.keys())}"
             )
         
+        # Validate that students provide preferred_anonymous_name
+        if user.role == 'student' and not user.preferred_anonymous_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="preferred_anonymous_name is required for students"
+            )
+        
         # New user with transaction for data consistency
         try:
             # Start transaction
@@ -129,25 +136,30 @@ async def create_user(user: UserCreate):
                     user.name,
                     user.email,
                     hashed_password,
-                    user.role,
-                    user.preferred_anonymous_name
+                    user.role
                 )
                 
                 if new_user_record is None:
                     raise HTTPException(status_code=500, detail= "failed to create user.")
                 
                 # Insert into role-specific table
-                await connection.execute(
-                    role_sql_queries[user.role],
-                    new_user_record['user_id']
-                )
+                if user.role == 'student':
+                    await connection.execute(
+                        role_sql_queries[user.role],
+                        new_user_record['user_id'],
+                        user.preferred_anonymous_name
+                    )
+                else:
+                    await connection.execute(
+                        role_sql_queries[user.role],
+                        new_user_record['user_id']
+                    )
                 
                 return User(
                     user_id=new_user_record['user_id'],
                     name=new_user_record['name'],
                     email=new_user_record['email'],
-                    role=new_user_record['role'],
-                    preferred_anonymous_name=new_user_record['preferred_anonymous_name']
+                    role=new_user_record['role']
                 )
         
         #checking if the email is used or not
