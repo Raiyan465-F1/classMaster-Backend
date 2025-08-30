@@ -37,6 +37,9 @@ app = FastAPI(lifespan= lifespan)
 # ======= CORS Middleware ======= 
 
 origin = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
     "http://localhost",
     "http://127.0.0.1",
     "http://127.0.0.1:5500", # port for live server extensions
@@ -89,7 +92,7 @@ async def create_user(user: UserCreate):
     
     # Role-specific table insertion queries
     role_sql_queries = {
-        'student': 'INSERT INTO "Student" (user_id) VALUES ($1)',
+        'student': 'INSERT INTO "Student" (user_id, preferred_anonymous_name) VALUES ($1, $2)',
         'faculty': 'INSERT INTO "Faculty" (user_id) VALUES ($1)',
         'admin': 'INSERT INTO "Admin" (user_id) VALUES ($1)'
     }
@@ -118,6 +121,13 @@ async def create_user(user: UserCreate):
                 detail=f"Invalid role. Must be one of: {', '.join(role_sql_queries.keys())}"
             )
         
+        # Validate that students provide preferred_anonymous_name
+        if user.role == 'student' and not user.preferred_anonymous_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="preferred_anonymous_name is required for students"
+            )
+        
         # New user with transaction for data consistency
         try:
             # Start transaction
@@ -126,7 +136,6 @@ async def create_user(user: UserCreate):
                 new_user_record = await connection.fetchrow(
                     user_sql_query,
                     user.user_id,
-        
                     user.name,
                     user.email,
                     hashed_password,
@@ -137,10 +146,17 @@ async def create_user(user: UserCreate):
                     raise HTTPException(status_code=500, detail= "failed to create user.")
                 
                 # Insert into role-specific table
-                await connection.execute(
-                    role_sql_queries[user.role],
-                    new_user_record['user_id']
-                )
+                if user.role == 'student':
+                    await connection.execute(
+                        role_sql_queries[user.role],
+                        new_user_record['user_id'],
+                        user.preferred_anonymous_name
+                    )
+                else:
+                    await connection.execute(
+                        role_sql_queries[user.role],
+                        new_user_record['user_id']
+                    )
                 
                 return User(
                     user_id=new_user_record['user_id'],
