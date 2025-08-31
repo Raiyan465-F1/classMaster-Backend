@@ -313,6 +313,33 @@ async def assign_faculty_to_section(assignment: FacultySectionAssign, faculty_id
         except asyncpg.exceptions.ForeignKeyViolationError:
             raise HTTPException(status_code=404, detail="The specified course code or section number does not exist.")
 
+@app.get("/faculty/all-sections", response_model=List[FacultySection])
+async def get_all_faculty_sections():
+    """Get all faculty-section assignments"""
+    async with DatabasePool.acquire() as conn:
+        records = await conn.fetch('SELECT * FROM "Faculty_Section" ORDER BY faculty_id, course_code, sec_number;')
+        if not records:
+            raise HTTPException(status_code=404, detail="No faculty section assignments found.")
+        return [FacultySection.model_validate(dict(record)) for record in records]
+
+@app.get("/faculty/{faculty_id}/sections", response_model=List[FacultySection])
+async def get_faculty_sections(faculty_id: int):
+    """Get sections assigned to a specific faculty member"""
+    async with DatabasePool.acquire() as conn:
+        # First check if faculty exists
+        faculty_exists = await conn.fetchval('SELECT 1 FROM "Faculty" WHERE user_id = $1', faculty_id)
+        if not faculty_exists:
+            raise HTTPException(status_code=404, detail=f"Faculty with ID {faculty_id} not found.")
+        
+        # Get faculty sections
+        records = await conn.fetch(
+            'SELECT * FROM "Faculty_Section" WHERE faculty_id = $1 ORDER BY course_code, sec_number;', 
+            faculty_id
+        )
+        if not records:
+            raise HTTPException(status_code=404, detail=f"No sections assigned to faculty ID {faculty_id}.")
+        return [FacultySection.model_validate(dict(record)) for record in records]
+
 # ======= available sections for students ========
 # @app.get("/section/available",response_model=List[Section])
 # async def get_available_sections():
