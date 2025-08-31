@@ -301,3 +301,29 @@ async def assign_faculty_to_section(assignment: FacultySectionAssign, faculty_id
             raise HTTPException(status_code=400, detail="Faculty member is already assigned to this section.")
         except asyncpg.exceptions.ForeignKeyViolationError:
             raise HTTPException(status_code=404, detail="The specified course code or section number does not exist.")
+
+# ======= available sections for students ========
+
+@app.get("/section/available",response_model=List[Section])
+async def get_available_sections():
+    sql="""select s.* from "Section" s join "Faculty_Section" fs on s.course_code = fs.course_code and s.sec_number = fs.sec_number group by s.course_code, s.sec_number; """
+    
+    async with DatabasePool.acquire() as conn:
+    		try:
+            records= await conn.fetch(sql)
+            return [Section.model_validate(dict(record)) for record in records]
+
+#======= Secton assign to Students ======
+
+@app.push("/students/assign-section", responds_model=StudentSection, status_code= status.HTTP_201_CREATED)
+async def assign_student_to_section(assignment:StudentSectionAssign, student_id: int= Depends(RoleChecker(["student"]))):
+    sql=""" insert into "Student_Section" (student_id, coure_code, sec_number) values ($1,$2,$3) returning *;"""
+    
+    async with DatabasePool.acquire() as conn:
+    		try:
+            record= await conn.fetchrwo(sql, student_id, assignment.course_code, assignment.sec_number)
+            return StudentSection.model_validate(dict(record))
+        except asyncpg.expections.UniqueViolationError:
+        		raise HTTPException(status_code=400, detail="Student is already enrolled in this section.")
+        except aysncpg.expection.ForeignKeyViolationError:
+        		raise HTTPExpection(status_code=404, detail="The specified course, section does not exist.")
