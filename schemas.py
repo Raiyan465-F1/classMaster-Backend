@@ -87,3 +87,12 @@ class FacultySection(BaseModel):
     sec_number: int
     class config:
         from_attributes= True
+
+class StudentSection(BaseModel):
+    student_id: int
+    course_code: str
+    sec_number: int
+    
+class StudentSectionAssign(BaseModel):
+    course_code: str
+    sec_num: int
