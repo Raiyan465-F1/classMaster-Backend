@@ -95,4 +95,4 @@ class StudentSection(BaseModel):
     
 class StudentSectionAssign(BaseModel):
     course_code: str
-    sec_num: int
+    sec_number: int
