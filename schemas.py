@@ -60,7 +60,7 @@ class SectionBase(BaseModel):
     location: str
 
 class SectionCreate(SectionBase):
-    pass
+    course_code: str = Field(..., max_length=8, description="Course code for the section")
 
 class Section(SectionBase):
     course_code: str

@@ -14,7 +14,7 @@ load_dotenv()
 
 # ======= Password Hashing ======= 
 
-pwd_context = CryptContext(schemes= ['bcrypt'], deprecated= 'auto')
+pwd_context = CryptContext(schemes= ['bcrypt'])
 
 # ======= ADMIN CREDENTIALS =======
 
@@ -76,6 +76,7 @@ async def upsert_admin():
 # ======= CORS Middleware ======= 
 
 origin = [
+    "http://localhost:3000",
     "http://localhost",
     "http://127.0.0.1",
     "http://127.0.0.1:5500", # port for live server extensions
@@ -239,7 +240,7 @@ async def login_user(user: UserLogin):
 
 # ======= Admin Course ADD API ======= 
 
-@app.post("/courses", response_model= Course, status_code=status.HTTP_201_CREATED)
+@app.post("/create-course", response_model= Course, status_code=status.HTTP_201_CREATED)
 async def create_course(course: CourseCreate, admin_id: int = Depends(RoleChecker(["admin"]))):
     sql = 'INSERT INTO "Course" (course_code, course_name) VALUES ($1, $2) RETURNING *;'
     async with DatabasePool.acquire() as conn:
@@ -251,37 +252,47 @@ async def create_course(course: CourseCreate, admin_id: int = Depends(RoleChecke
 
 # ======= Admin Section ADD API =======
 
-@app.post("/courses/{course_code}/sections", response_model = Section, status_code= status.HTTP_201_CREATED)
-async def create_section_for_course(course_code: str, section: SectionCreate, admin_id: int = Depends(RoleChecker(["admin"]))):
+@app.post("/create-section", response_model = Section, status_code= status.HTTP_201_CREATED)
+async def create_section(section: SectionCreate, admin_id: int = Depends(RoleChecker(["admin"]))):
     sql = """
         INSERT INTO "Section" (course_code, sec_number, start_time, end_time, day_of_week, location)
         VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING *;
     """
     async with DatabasePool.acquire() as conn:
-        course_exists= await conn.fetchval('SELECT 1 FROM "Course" WHERE course_code = $1', course_code)
+        # Check if course exists using course_code from request body
+        course_exists= await conn.fetchval('SELECT 1 FROM "Course" WHERE course_code = $1', section.course_code)
         if not course_exists:
-            raise HTTPException(status_code= 404, detail= f"Course '{course_code}' not found.")
+            raise HTTPException(status_code= 404, detail= f"Course '{section.course_code}' not found.")
         try:
-            record = await conn.fetchrow(sql, course_code, section.sec_number, section.start_time, section.end_time, section.day_of_week, section.location)
+            record = await conn.fetchrow(sql, section.course_code, section.sec_number, section.start_time, section.end_time, section.day_of_week, section.location)
             return Section.model_validate(dict(record))
         except asyncpg.exceptions.UniqueViolationError:
-            raise HTTPException(status_code= 400, detail=f"Section {section.sec_number} for course '{course_code}' already exists.")
+            raise HTTPException(status_code= 400, detail=f"Section {section.sec_number} for course '{section.course_code}' already exists.")
 
 # ======= Global Course and Section showing API =======
 
-@app.get("/courses", response_model=List[Course])
+@app.get("/all-courses", response_model=List[Course])
 async def get_all_courses():
     async with DatabasePool.acquire() as conn:
         records= await conn.fetch('select * from "Course";')
         return[Course.model_validate(dict(record)) for record in records]
 
-@app.get('/courses/{course_code}/sections', response_model=List[Section])
+@app.get('/section-by-course', response_model=List[Section])
 async def get_course_sections(course_code: str):
     async with DatabasePool.acquire() as conn:
         records= await conn.fetch('select * from "Section" where course_code = $1;', course_code)
         if not records:
             raise HTTPException(status_code=404, detail=f"No section found for for course '{course_code}'.")
+        return [Section.model_validate(dict(record)) for record in records]
+
+@app.get('/all-sections', response_model=List[Section])
+async def get_all_sections():
+    """Get all sections from all courses"""
+    async with DatabasePool.acquire() as conn:
+        records = await conn.fetch('SELECT * FROM "Section" ORDER BY course_code, sec_number;')
+        if not records:
+            raise HTTPException(status_code=404, detail="No sections found in the database.")
         return [Section.model_validate(dict(record)) for record in records]
 
 # ======= Faculty Course+Section ADD API =======
@@ -303,27 +314,24 @@ async def assign_faculty_to_section(assignment: FacultySectionAssign, faculty_id
             raise HTTPException(status_code=404, detail="The specified course code or section number does not exist.")
 
 # ======= available sections for students ========
+# @app.get("/section/available",response_model=List[Section])
+# async def get_available_sections():
+#     sql="""select s.* from "Section" s join "Faculty_Section" fs on s.course_code = fs.course_code and s.sec_number = fs.sec_number group by s.course_code, s.sec_number; """
+#     async with DatabasePool.acquire() as conn:
+#     		try:
+#             records= await conn.fetch(sql)
+#             return [Section.model_validate(dict(record)) for record in records]
 
-@app.get("/section/available",response_model=List[Section])
-async def get_available_sections():
-    sql="""select s.* from "Section" s join "Faculty_Section" fs on s.course_code = fs.course_code and s.sec_number = fs.sec_number group by s.course_code, s.sec_number; """
+# #======= Secton assign to Students ======
+# @app.push("/students/assign-section", responds_model=StudentSection, status_code= status.HTTP_201_CREATED)
+# async def assign_student_to_section(assignment:StudentSectionAssign, student_id: int= Depends(RoleChecker(["student"]))):
+#     sql=""" insert into "Student_Section" (student_id, coure_code, sec_number) values ($1,$2,$3) returning *;"""
     
-    async with DatabasePool.acquire() as conn:
-    		try:
-            records= await conn.fetch(sql)
-            return [Section.model_validate(dict(record)) for record in records]
-
-#======= Secton assign to Students ======
-
-@app.push("/students/assign-section", responds_model=StudentSection, status_code= status.HTTP_201_CREATED)
-async def assign_student_to_section(assignment:StudentSectionAssign, student_id: int= Depends(RoleChecker(["student"]))):
-    sql=""" insert into "Student_Section" (student_id, coure_code, sec_number) values ($1,$2,$3) returning *;"""
-    
-    async with DatabasePool.acquire() as conn:
-    		try:
-            record= await conn.fetchrwo(sql, student_id, assignment.course_code, assignment.sec_number)
-            return StudentSection.model_validate(dict(record))
-        except asyncpg.expections.UniqueViolationError:
-        		raise HTTPException(status_code=400, detail="Student is already enrolled in this section.")
-        except aysncpg.expection.ForeignKeyViolationError:
-        		raise HTTPExpection(status_code=404, detail="The specified course, section does not exist.")
+#     async with DatabasePool.acquire() as conn:
+#     		try:
+#             record= await conn.fetchrwo(sql, student_id, assignment.course_code, assignment.sec_number)
+#             return StudentSection.model_validate(dict(record))
+#         except asyncpg.expections.UniqueViolationError:
+#         		raise HTTPException(status_code=400, detail="Student is already enrolled in this section.")
+#         except aysncpg.expection.ForeignKeyViolationError:
+#         		raise HTTPExpection(status_code=404, detail="The specified course, section does not exist.")
