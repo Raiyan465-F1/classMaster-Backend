@@ -96,3 +96,18 @@ class StudentSection(BaseModel):
 class StudentSectionAssign(BaseModel):
     course_code: str
     sec_number: int
+
+class Announcement(BaseModel):
+    announcement_id: int
+    title: str
+    content: str
+    created_at: datetime.datetime
+    type: str
+    section_crouse_code: str
+    section_sec_number: int
+    faculty_id: int
+
+class AnnouncementCreate(BaseModel):
+    tile: str= Field(..., max_length=255)
+    content: str
+    type: str

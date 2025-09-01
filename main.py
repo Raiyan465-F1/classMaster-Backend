@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
-from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign
+from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement
 from typing import List
 
 # ======= SetUp ======= 
@@ -368,3 +368,44 @@ async def assign_student_to_section(assignment:StudentSectionAssign, student_id:
             raise HTTPException(status_code=400, detail="Student is already enrolled in this section.")
         except asyncpg.exceptions.ForeignKeyViolationError:
             raise HTTPException(status_code=404, detail="The specified course, section does not exist.")
+
+#======= Announcement from Faculty-end-creation =========
+
+@app.post("/sections/{course_code}/{sec_number}/announcement", response_model= Announcement, status_code= status.HTTP_201_CREATED)
+async def create_announcement_for_section(
+    course_code: str,
+    sec_number: int,
+    announcement: AnnouncementCreate,
+    faculty_id: int = Depends(RoleChecker(["faculty"]))
+):
+    async with DatabasePool.acquire() as conn:
+        is_assigned =  await conn.fetchal('SELECT 1 FROM "Faculty_Section" WHERE faculty_id = $1 AND course_code = $2 AND sec_number = $3',
+            faculty_id, course_code, sec_number)
+        if not is_assigned:
+            raise HTTPException(status_code=403, detail="Faculty not assigned to this section.")
+        
+        sql= """
+            insert into "Announcement" (title, content, type, section_course_code, section_sec_number, faculty_id)
+            values ($1, $2, $3, $4, $5, $6) returning *;
+        """
+        try:
+            record= await conn.fetchrow(sql, announcement.title, announcement.content, announcement.type, course_code, sec_number, faculty_id)
+            return Announcement.model_validate(dict(record))
+        except Exception as e:
+            raise HTTPException(status_code=500, details= f"Failed to create announcement: {e}")
+
+@app.get("/my-sections/{course_code}/{section_number}/announcements", response_mode= List[Announcement])
+async def get_announcement_for_section(
+    course_code: str,
+    sec_number:int,
+    student_id: int = Depends(RoleChecker(["student"]))
+):
+    async with DatabasePool.acquire() as conn:
+        is_enrolled= await conn.fetchval('SELECT 1 FROM "Student_Section" WHERE student_id = $1 AND course_code = $2 AND sec_number = $3',
+            student_id, course_code, sec_number)
+        if not is_enrolled:
+            raise HTTPException(status_code=403, detail="Student not enrolled in this section")
+        
+        sql= 'SELECT * FROM "Announcement" WHERE section_course_code = $1 AND section_sec_number = $2 ORDER BY created_at DESC;'
+        records = await conn.fetch(sql, course_code, sec_number)
+        return [Announcement.model_validate(dict(record)) for record in records]
