@@ -379,7 +379,7 @@ async def create_announcement_for_section(
     faculty_id: int = Depends(RoleChecker(["faculty"]))
 ):
     async with DatabasePool.acquire() as conn:
-        is_assigned =  await conn.fetchal('SELECT 1 FROM "Faculty_Section" WHERE faculty_id = $1 AND course_code = $2 AND sec_number = $3',
+        is_assigned =  await conn.fetchval('SELECT 1 FROM "Faculty_Section" WHERE faculty_id = $1 AND course_code = $2 AND sec_number = $3',
             faculty_id, course_code, sec_number)
         if not is_assigned:
             raise HTTPException(status_code=403, detail="Faculty not assigned to this section.")
@@ -392,9 +392,9 @@ async def create_announcement_for_section(
             record= await conn.fetchrow(sql, announcement.title, announcement.content, announcement.type, course_code, sec_number, faculty_id)
             return Announcement.model_validate(dict(record))
         except Exception as e:
-            raise HTTPException(status_code=500, details= f"Failed to create announcement: {e}")
+            raise HTTPException(status_code=500, detail= f"Failed to create announcement: {e}")
 
-@app.get("/my-sections/{course_code}/{section_number}/announcements", response_mode= List[Announcement])
+@app.get("/my-sections/{course_code}/{section_number}/announcements", response_model= List[Announcement])
 async def get_announcement_for_section(
     course_code: str,
     sec_number:int,

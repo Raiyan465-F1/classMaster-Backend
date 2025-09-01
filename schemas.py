@@ -7,6 +7,11 @@ from enum import Enum
 class RegisterableRole(str, Enum):
     student= "student"
     faculty= "faculty"
+
+class AnnouncementType(str, Enum):
+    quiz = "quiz"
+    assignment = "assignment"
+    general = "general"
 class UserCreate(BaseModel):
     # Creating User by pydantic model
     user_id: int = Field(..., gt=0, description="Student ID, Employee ID (positive integer)")
@@ -103,11 +108,11 @@ class Announcement(BaseModel):
     content: str
     created_at: datetime.datetime
     type: str
-    section_crouse_code: str
+    section_course_code: str
     section_sec_number: int
     faculty_id: int
 
 class AnnouncementCreate(BaseModel):
-    tile: str= Field(..., max_length=255)
+    title: str = Field(..., max_length=255)
     content: str
-    type: str
+    type: AnnouncementType = Field(..., description="Type of announcement: quiz, assignment, or general")
