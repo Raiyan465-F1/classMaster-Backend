@@ -361,6 +361,25 @@ async def assign_student_to_section(assignment:StudentSectionAssign, student_id:
         """
     
     async with DatabasePool.acquire() as conn:
+        # First check if the section exists
+        section_exists = await conn.fetchval(
+            'SELECT 1 FROM "Section" WHERE course_code = $1 AND sec_number = $2', 
+            assignment.course_code, assignment.sec_number
+        )
+        if not section_exists:
+            raise HTTPException(status_code=404, detail="The specified course or section does not exist.")
+        
+        # Check if there's a faculty assigned to this section
+        faculty_assigned = await conn.fetchval(
+            'SELECT 1 FROM "Faculty_Section" WHERE course_code = $1 AND sec_number = $2', 
+            assignment.course_code, assignment.sec_number
+        )
+        if not faculty_assigned:
+            raise HTTPException(
+                status_code=400, 
+                detail="Cannot enroll in this section. No faculty has been assigned to teach this section yet."
+            )
+        
         try:
             record= await conn.fetchrow(sql, student_id, assignment.course_code, assignment.sec_number)
             return StudentSection.model_validate(dict(record))
@@ -369,43 +388,102 @@ async def assign_student_to_section(assignment:StudentSectionAssign, student_id:
         except asyncpg.exceptions.ForeignKeyViolationError:
             raise HTTPException(status_code=404, detail="The specified course, section does not exist.")
 
+@app.get("/students/{student_id}/sections", response_model=List[StudentSection])
+async def get_student_sections(student_id: int):
+    """Get sections enrolled by a specific student"""
+    async with DatabasePool.acquire() as conn:
+        # First check if student exists
+        student_exists = await conn.fetchval('SELECT 1 FROM "Student" WHERE user_id = $1', student_id)
+        if not student_exists:
+            raise HTTPException(status_code=404, detail=f"Student with ID {student_id} not found.")
+        
+        # Get student's enrolled sections
+        records = await conn.fetch(
+            'SELECT * FROM "Student_Section" WHERE student_id = $1 ORDER BY course_code, sec_number;', 
+            student_id
+        )
+        if not records:
+            raise HTTPException(status_code=404, detail=f"No sections found for student ID {student_id}.")
+        return [StudentSection.model_validate(dict(record)) for record in records]
+
 #======= Announcement from Faculty-end-creation =========
 
-@app.post("/sections/{course_code}/{sec_number}/announcement", response_model= Announcement, status_code= status.HTTP_201_CREATED)
+@app.post("/create-announcement", response_model= Announcement, status_code= status.HTTP_201_CREATED)
 async def create_announcement_for_section(
-    course_code: str,
-    sec_number: int,
     announcement: AnnouncementCreate,
     faculty_id: int = Depends(RoleChecker(["faculty"]))
 ):
     async with DatabasePool.acquire() as conn:
-        is_assigned =  await conn.fetchval('SELECT 1 FROM "Faculty_Section" WHERE faculty_id = $1 AND course_code = $2 AND sec_number = $3',
-            faculty_id, course_code, sec_number)
+        # Check if faculty is assigned to this section
+        is_assigned = await conn.fetchval(
+            'SELECT 1 FROM "Faculty_Section" WHERE faculty_id = $1 AND course_code = $2 AND sec_number = $3',
+            faculty_id, announcement.course_code, announcement.sec_number
+        )
         if not is_assigned:
             raise HTTPException(status_code=403, detail="Faculty not assigned to this section.")
         
-        sql= """
-            insert into "Announcement" (title, content, type, section_course_code, section_sec_number, faculty_id)
-            values ($1, $2, $3, $4, $5, $6) returning *;
-        """
+        # Validate deadline for quiz/assignment types
+        if announcement.type in ['quiz', 'assignment'] and not announcement.deadline:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Deadline is required for {announcement.type} announcements."
+            )
+        
         try:
-            record= await conn.fetchrow(sql, announcement.title, announcement.content, announcement.type, course_code, sec_number, faculty_id)
-            return Announcement.model_validate(dict(record))
+            # Start transaction for data consistency
+            async with conn.transaction():
+                # 1. Create the announcement
+                announcement_sql = """
+                    INSERT INTO "Announcement" (title, content, type, section_course_code, section_sec_number, faculty_id, deadline)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;
+                """
+                announcement_record = await conn.fetchrow(
+                    announcement_sql, 
+                    announcement.title, 
+                    announcement.content, 
+                    announcement.type, 
+                    announcement.course_code, 
+                    announcement.sec_number, 
+                    faculty_id,
+                    announcement.deadline
+                )
+                
+                # 2. If it's a quiz or assignment, create todos for all students in that section
+                if announcement.type in ['quiz', 'assignment']:
+                    # Get all students enrolled in this section
+                    students_sql = """
+                        SELECT student_id FROM "Student_Section" 
+                        WHERE course_code = $1 AND sec_number = $2
+                    """
+                    students = await conn.fetch(students_sql, announcement.course_code, announcement.sec_number)
+                    
+                    # Create todos for each student
+                    for student in students:
+                        todo_sql = """
+                            INSERT INTO "Todo" (user_id, title, status, due_date, related_announcement)
+                            VALUES ($1, $2, $3, $4, $5)
+                        """
+                        await conn.execute(
+                            todo_sql,
+                            student['student_id'],
+                            f"{announcement.type.title()}: {announcement.title}",
+                            'pending',
+                            announcement.deadline.date() if announcement.deadline else None,
+                            announcement_record['announcement_id']
+                        )
+                
+                return Announcement.model_validate(dict(announcement_record))
+                
         except Exception as e:
             raise HTTPException(status_code=500, detail= f"Failed to create announcement: {e}")
 
-@app.get("/my-sections/{course_code}/{section_number}/announcements", response_model= List[Announcement])
-async def get_announcement_for_section(
+@app.get("/announcements", response_model= List[Announcement])
+async def get_announcements_for_section(
     course_code: str,
-    sec_number:int,
-    student_id: int = Depends(RoleChecker(["student"]))
+    sec_number: int
 ):
     async with DatabasePool.acquire() as conn:
-        is_enrolled= await conn.fetchval('SELECT 1 FROM "Student_Section" WHERE student_id = $1 AND course_code = $2 AND sec_number = $3',
-            student_id, course_code, sec_number)
-        if not is_enrolled:
-            raise HTTPException(status_code=403, detail="Student not enrolled in this section")
-        
-        sql= 'SELECT * FROM "Announcement" WHERE section_course_code = $1 AND section_sec_number = $2 ORDER BY created_at DESC;'
+        # Get announcements for this section (no authorization required)
+        sql = 'SELECT * FROM "Announcement" WHERE section_course_code = $1 AND section_sec_number = $2 ORDER BY created_at DESC;'
         records = await conn.fetch(sql, course_code, sec_number)
         return [Announcement.model_validate(dict(record)) for record in records]

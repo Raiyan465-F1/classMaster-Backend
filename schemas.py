@@ -111,8 +111,12 @@ class Announcement(BaseModel):
     section_course_code: str
     section_sec_number: int
     faculty_id: int
+    deadline: Optional[datetime.datetime] = None
 
 class AnnouncementCreate(BaseModel):
     title: str = Field(..., max_length=255)
     content: str
     type: AnnouncementType = Field(..., description="Type of announcement: quiz, assignment, or general")
+    course_code: str = Field(..., max_length=8, description="Course code for the section")
+    sec_number: int = Field(..., description="Section number")
+    deadline: Optional[datetime.datetime] = Field(None, description="Deadline for quiz/assignment (optional for general announcements)")
