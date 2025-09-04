@@ -117,3 +117,12 @@ CREATE TABLE "Leaderboard" (
 
 ALTER TABLE "Student" 
 ADD COLUMN "preferred_anonymous_name" VARCHAR(100);
+
+-- Add deadline column to Announcement table
+ALTER TABLE "Announcement" 
+ADD COLUMN "deadline" TIMESTAMPTZ;
+
+-- Update the existing announcement to have deadline
+UPDATE "Announcement" 
+SET "deadline" = NULL 
+WHERE "deadline" IS NULL;
