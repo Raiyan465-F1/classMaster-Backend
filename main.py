@@ -477,7 +477,7 @@ async def create_announcement_for_section(
         except Exception as e:
             raise HTTPException(status_code=500, detail= f"Failed to create announcement: {e}")
 
-@app.get("/announcements", response_model= List[Announcement])
+@app.get("/announcements/{course_code}/{sec_number}", response_model= List[Announcement])
 async def get_announcements_for_section(
     course_code: str,
     sec_number: int
@@ -486,4 +486,266 @@ async def get_announcements_for_section(
         # Get announcements for this section (no authorization required)
         sql = 'SELECT * FROM "Announcement" WHERE section_course_code = $1 AND section_sec_number = $2 ORDER BY created_at DESC;'
         records = await conn.fetch(sql, course_code, sec_number)
+        return [Announcement.model_validate(dict(record)) for record in records]
+
+@app.get("/faculty/{faculty_id}/announcements", response_model= List[Announcement])
+async def get_all_faculty_announcements(faculty_id: int):
+    """Get all announcements posted by a specific faculty member"""
+    async with DatabasePool.acquire() as conn:
+        # First check if faculty exists
+        faculty_exists = await conn.fetchval('SELECT 1 FROM "Faculty" WHERE user_id = $1', faculty_id)
+        if not faculty_exists:
+            raise HTTPException(status_code=404, detail=f"Faculty with ID {faculty_id} not found.")
+        
+        # Get all announcements posted by this faculty
+        sql = 'SELECT * FROM "Announcement" WHERE faculty_id = $1 ORDER BY created_at DESC;'
+        records = await conn.fetch(sql, faculty_id) 
+        return [Announcement.model_validate(dict(record)) for record in records]
+
+@app.patch("/announcements/{announcement_id}", response_model= Announcement)
+async def update_announcement(
+    announcement_id: int,
+    announcement_update: AnnouncementCreate,
+    faculty_id: int = Depends(RoleChecker(["faculty"]))
+):
+    """Update an announcement (only by the faculty who created it)"""
+    async with DatabasePool.acquire() as conn:
+        # Check if announcement exists and belongs to this faculty
+        existing_announcement = await conn.fetchrow(
+            'SELECT * FROM "Announcement" WHERE announcement_id = $1 AND faculty_id = $2',
+            announcement_id, faculty_id
+        )
+        if not existing_announcement:
+            raise HTTPException(status_code=404, detail="Announcement not found or you don't have permission to edit it.")
+        
+        # Validate deadline for quiz/assignment types
+        if announcement_update.type in ['quiz', 'assignment'] and not announcement_update.deadline:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Deadline is required for {announcement_update.type} announcements."
+            )
+        
+        try:
+            # Start transaction for data consistency
+            async with conn.transaction():
+                # 1. Update the announcement
+                update_sql = """
+                    UPDATE "Announcement" 
+                    SET title = $1, content = $2, type = $3, deadline = $4
+                    WHERE announcement_id = $5 AND faculty_id = $6
+                    RETURNING *;
+                """
+                updated_announcement = await conn.fetchrow(
+                    update_sql,
+                    announcement_update.title,
+                    announcement_update.content,
+                    announcement_update.type,
+                    announcement_update.deadline,
+                    announcement_id,
+                    faculty_id
+                )
+                
+                # 2. Handle todos if they exist
+                existing_todos = await conn.fetch(
+                    'SELECT * FROM "Todo" WHERE related_announcement = $1',
+                    announcement_id
+                )
+                
+                if existing_todos:
+                    if announcement_update.type in ['quiz', 'assignment']:
+                        # Update existing todos with new title and deadline
+                        for todo in existing_todos:
+                            await conn.execute(
+                                'UPDATE "Todo" SET title = $1, due_date = $2 WHERE todo_id = $3',
+                                f"{announcement_update.type.title()}: {announcement_update.title}",
+                                announcement_update.deadline.date() if announcement_update.deadline else None,
+                                todo['todo_id']
+                            )
+                    else:
+                        # If type changed to 'general', remove todos
+                        await conn.execute(
+                            'DELETE FROM "Todo" WHERE related_announcement = $1',
+                            announcement_id
+                        )
+                else:
+                    # If no todos existed but now it's quiz/assignment, create them
+                    if announcement_update.type in ['quiz', 'assignment']:
+                        # Get all students enrolled in this section
+                        students = await conn.fetch(
+                            'SELECT student_id FROM "Student_Section" WHERE course_code = $1 AND sec_number = $2',
+                            existing_announcement['section_course_code'],
+                            existing_announcement['section_sec_number']
+                        )
+                        
+                        # Create todos for each student
+                        for student in students:
+                            await conn.execute(
+                                'INSERT INTO "Todo" (user_id, title, status, due_date, related_announcement) VALUES ($1, $2, $3, $4, $5)',
+                                student['student_id'],
+                                f"{announcement_update.type.title()}: {announcement_update.title}",
+                                'pending',
+                                announcement_update.deadline.date() if announcement_update.deadline else None,
+                                announcement_id
+                            )
+                
+                return Announcement.model_validate(dict(updated_announcement))
+                
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update announcement: {e}")
+
+@app.delete("/announcements/{announcement_id}")
+async def delete_announcement(
+    announcement_id: int,
+    faculty_id: int = Depends(RoleChecker(["faculty"]))
+):
+    """Delete an announcement (only by the faculty who created it)"""
+    async with DatabasePool.acquire() as conn:
+        # Check if announcement exists and belongs to this faculty
+        existing_announcement = await conn.fetchrow(
+            'SELECT * FROM "Announcement" WHERE announcement_id = $1 AND faculty_id = $2',
+            announcement_id, faculty_id
+        )
+        if not existing_announcement:
+            raise HTTPException(status_code=404, detail="Announcement not found or you don't have permission to delete it.")
+        
+        try:
+            async with conn.transaction():
+                # 1. Delete related todos first (due to foreign key constraint)
+                await conn.execute(
+                    'DELETE FROM "Todo" WHERE related_announcement = $1',
+                    announcement_id
+                )
+                
+                # 2. Delete the announcement
+                await conn.execute(
+                    'DELETE FROM "Announcement" WHERE announcement_id = $1',
+                    announcement_id
+                )
+                
+                return {"message": "Announcement and related todos deleted successfully"}
+                
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete announcement: {e}")
+
+@app.get("/schedule/{user_id}")
+async def get_user_schedule(
+    user_id: int
+):
+    """Get schedule for a user (student or faculty) organized by day of week"""
+    async with DatabasePool.acquire() as conn:
+        # Check user role
+        user_role_sql = 'SELECT role FROM "User" WHERE user_id = $1'
+        user_role = await conn.fetchval(user_role_sql, user_id)
+        
+        if not user_role:
+            raise HTTPException(status_code=404, detail="User not found.")
+        
+        # Validate that user is student or faculty
+        if user_role not in ["student", "faculty"]:
+            raise HTTPException(status_code=403, detail="Schedule access only available for students and faculty.")
+        
+        # Get sections based on user role
+        if user_role == "student":
+            sections_sql = """
+                SELECT 
+                    s.course_code,
+                    s.sec_number,
+                    s.start_time,
+                    s.end_time,
+                    s.day_of_week,
+                    s.location,
+                    c.course_name
+                FROM "Section" s
+                JOIN "Course" c ON s.course_code = c.course_code
+                JOIN "Student_Section" ss ON s.course_code = ss.course_code AND s.sec_number = ss.sec_number
+                WHERE ss.student_id = $1
+                ORDER BY 
+                    CASE s.day_of_week 
+                        WHEN 'Monday' THEN 1
+                        WHEN 'Tuesday' THEN 2
+                        WHEN 'Wednesday' THEN 3
+                        WHEN 'Thursday' THEN 4
+                        WHEN 'Friday' THEN 5
+                        WHEN 'Saturday' THEN 6
+                        WHEN 'Sunday' THEN 7
+                    END,
+                    s.start_time
+            """
+        else:  # faculty
+            sections_sql = """
+                SELECT 
+                    s.course_code,
+                    s.sec_number,
+                    s.start_time,
+                    s.end_time,
+                    s.day_of_week,
+                    s.location,
+                    c.course_name
+                FROM "Section" s
+                JOIN "Course" c ON s.course_code = c.course_code
+                JOIN "Faculty_Section" fs ON s.course_code = fs.course_code AND s.sec_number = fs.sec_number
+                WHERE fs.faculty_id = $1
+                ORDER BY 
+                    CASE s.day_of_week 
+                        WHEN 'Monday' THEN 1
+                        WHEN 'Tuesday' THEN 2
+                        WHEN 'Wednesday' THEN 3
+                        WHEN 'Thursday' THEN 4
+                        WHEN 'Friday' THEN 5
+                        WHEN 'Saturday' THEN 6
+                        WHEN 'Sunday' THEN 7
+                    END,
+                    s.start_time
+            """
+        
+        sections = await conn.fetch(sections_sql, user_id)
+        
+        # Organize sections by day of week
+        schedule = {}
+        days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        
+        for day in days_order:
+            schedule[day] = []
+        
+        for section in sections:
+            day = section['day_of_week'].title()
+            schedule[day].append({
+                "course_code": section['course_code'],
+                "course_name": section['course_name'],
+                "sec_number": section['sec_number'],
+                "start_time": str(section['start_time']),
+                "end_time": str(section['end_time']),
+                "location": section['location']
+            })
+        
+        return {
+            "user_id": user_id,
+            "role": user_role,
+            "schedule": schedule
+        }
+
+@app.get("/students/{student_id}/announcements", response_model=List[Announcement])
+async def get_all_student_announcements(student_id: int):
+    """Get all announcements for all sections a student is enrolled in"""
+    async with DatabasePool.acquire() as conn:
+        # First check if student exists
+        student_exists = await conn.fetchval('SELECT 1 FROM "Student" WHERE user_id = $1', student_id)
+        if not student_exists:
+            raise HTTPException(status_code=404, detail=f"Student with ID {student_id} not found.")
+        
+        # Get all announcements for sections where student is enrolled
+        announcements_sql = """
+            SELECT DISTINCT a.*
+            FROM "Announcement" a
+            JOIN "Student_Section" ss ON a.section_course_code = ss.course_code 
+                AND a.section_sec_number = ss.sec_number
+            WHERE ss.student_id = $1
+            ORDER BY a.created_at DESC;
+        """
+        
+        records = await conn.fetch(announcements_sql, student_id)
+        
+        if not records:
+            return []
+        
         return [Announcement.model_validate(dict(record)) for record in records]
