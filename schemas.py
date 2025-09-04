@@ -69,7 +69,6 @@ class SectionCreate(SectionBase):
 
 class Section(SectionBase):
     course_code: str
-    grades_publicly_visible: bool
     class config:
         from_attributes= True
 class CourseBase(BaseModel):
@@ -146,4 +145,3 @@ class StudentGradeSummary(BaseModel):
     grades: List[GradeDetail]
     course_code: str = Field(..., max_length=8, description="Course code for the section")
     sec_number: int = Field(..., description="Section number")
-    deadline: Optional[datetime.datetime] = Field(None, description="Deadline for quiz/assignment (optional for general announcements)")
