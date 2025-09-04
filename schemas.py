@@ -120,3 +120,44 @@ class AnnouncementCreate(BaseModel):
     course_code: str = Field(..., max_length=8, description="Course code for the section")
     sec_number: int = Field(..., description="Section number")
     deadline: Optional[datetime.datetime] = Field(None, description="Deadline for quiz/assignment (optional for general announcements)")
+
+class StudentTaskCreate(BaseModel):
+    """Schema for creating a new student task"""
+    title: str = Field(..., min_length=1, max_length=255, description="Task title")
+    due_date: Optional[datetime.date] = Field(None, description="Due date for the task (optional)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "title": "Study for Physics Midterm",
+                "due_date": "2024-01-15"
+            }
+        }
+
+class StudentTaskStatusUpdate(BaseModel):
+    """Schema for updating task status"""
+    status: str = Field(..., description="New status: pending, completed, or delayed")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "completed"
+            }
+        }
+
+class StudentTask(BaseModel):
+    """Schema for student task response including todo and related announcement details"""
+    todo_id: int
+    title: str
+    status: str
+    due_date: Optional[datetime.date] = None
+    related_announcement_id: Optional[int] = None
+    announcement_title: Optional[str] = None
+    announcement_content: Optional[str] = None
+    announcement_type: Optional[str] = None
+    announcement_deadline: Optional[datetime.datetime] = None
+    course_code: Optional[str] = None
+    section_number: Optional[int] = None
+    
+    class Config:
+        from_attributes = True
