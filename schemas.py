@@ -135,3 +135,11 @@ class PublicGradeEntry(BaseModel):
     student_name: str
     grade_type: str
     marks: float
+
+class GradeDetail(BaseModel):
+    grade_type: str
+    marks: float
+
+class StudentGradeSummary(BaseModel):
+    total_marks: float
+    grades: List[GradeDetail]

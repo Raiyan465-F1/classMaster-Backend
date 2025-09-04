@@ -4,13 +4,14 @@ import io
 import asyncpg
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status, Depends, Header
+from fastapi import FastAPI, HTTPException, status, Depends, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
 from schemas import (
     User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, 
     FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, 
-    AnnouncementCreate, Announcement, Grade, GradeCreate, PublicGradeEntry
+    AnnouncementCreate, Announcement, Grade, GradeCreate, PublicGradeEntry,
+    StudentGradeSummary, GradeDetail
 )
 from typing import List
 
@@ -489,3 +490,35 @@ async def get_section_gradesheet(course_code: str, sec_number: int, student_id: 
         """
         records = await conn.fetch(sql, course_code, sec_number)
         return [PublicGradeEntry.model_validate(dict(record)) for record in records]
+
+#======= student Grades Dashboard =========
+
+@app.get("/my-dashboard/{course_code}/{sec_number}", response_model=StudentGradeSummary)
+async def get_student_dash_grade(
+    course_code: str,
+    sec_number: int,
+    student_id: int= Depends(RoleChecker(["student"]))
+):
+    async with DatabasePool.acquire() as conn:
+        is_enrolled= await conn.fetchval('SELECT 1 FROM "Student_Section" WHERE student_id = $1 AND course_code = $2 AND sec_number = $3',
+            student_id, course_code, sec_number)
+        if not is_enrolled:
+            raise HTTPException(status_code=403, detail= "You are not enrolled in this section.")
+        # Query 1: Get all individual grade entries
+        grades_sql = 'SELECT grade_type, marks FROM "Grade" WHERE student_id = $1 AND course_code = $2 AND sec_number = $3;'
+        grade_records = await conn.fetch(grades_sql, student_id, course_code, sec_number)
+        
+        # Query 2: Calculate the sum of marks directly in the database
+        total_sql = 'SELECT SUM(marks) as total FROM "Grade" WHERE student_id = $1 AND course_code = $2 AND sec_number = $3;'
+        total_record = await conn.fetchrow(total_sql, student_id, course_code, sec_number)
+        
+        # If there are no grades, total will be None. Default to 0.
+        total_marks = total_record['total'] if total_record and total_record['total'] is not None else 0.0
+        
+        # Construct the response object
+        grade_details = [GradeDetail.model_validate(dict(record)) for record in grade_records]
+        
+        return StudentGradeSummary(
+            total_marks=total_marks,
+            grades=grade_details
+        )
