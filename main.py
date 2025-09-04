@@ -601,7 +601,7 @@ async def get_student_dash_grade(
             total_marks=total_marks,
             grades=grade_details
         )
-=======
+        
 @app.get("/faculty/{faculty_id}/announcements", response_model= List[Announcement])
 async def get_all_faculty_announcements(faculty_id: int):
     """Get all announcements posted by a specific faculty member"""

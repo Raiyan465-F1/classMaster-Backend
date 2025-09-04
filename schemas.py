@@ -144,7 +144,6 @@ class GradeDetail(BaseModel):
 class StudentGradeSummary(BaseModel):
     total_marks: float
     grades: List[GradeDetail]
-=======
     course_code: str = Field(..., max_length=8, description="Course code for the section")
     sec_number: int = Field(..., description="Section number")
     deadline: Optional[datetime.datetime] = Field(None, description="Deadline for quiz/assignment (optional for general announcements)")
