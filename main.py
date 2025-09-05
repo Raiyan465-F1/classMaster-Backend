@@ -2,11 +2,13 @@ import os
 import csv
 import io
 import asyncpg
+import asyncio
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, Depends, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
+from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate
 from schemas import (
     User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, 
     FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, 
@@ -36,23 +38,42 @@ DatabasePool= None
 
 app = FastAPI()
 
+# ======= Background Task for Auto-Updating Quiz Statuses =======
+
+async def background_quiz_updater():
+    """Background task that runs every 5 minutes to auto-update expired quiz statuses"""
+    while True:
+        try:
+            await auto_update_quiz_statuses()
+            # Wait 5 minutes (300 seconds) before next check
+            await asyncio.sleep(30)
+        except Exception as e:
+            print(f"Error in background quiz updater: {e}")
+            # Wait 1 minute before retrying on error
+            await asyncio.sleep(30)
+
 # --- STARTUP AND SHUTDOWN LOGIC ---
 
 @app.on_event("startup")
 async def startup_event():
     """This function will run once when the application starts."""
     global DatabasePool
+    
     print("Info :    Entering the world of NeonDB... ")
     DatabasePool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
     print("INFO :    Welcome to the World of NeonDB. Connection successful.")
     await upsert_admin() # Ensure admin exists after pool is created
+    
+    # Start the background task for auto-updating quiz statuses
+    asyncio.create_task(background_quiz_updater())
+    print("INFO :    Background quiz status updater started (runs every 5 minutes)")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """This function will run once when the application shuts down."""
     if DatabasePool:
-        print("INFO:   Disconnecting the World...  ")
-        await DatabasePool.close()
+            print("INFO:   Disconnecting the World...  ")
+            await DatabasePool.close()
 
 
 async def upsert_admin():
@@ -387,9 +408,39 @@ async def assign_student_to_section(assignment:StudentSectionAssign, student_id:
                 detail="Cannot enroll in this section. No faculty has been assigned to teach this section yet."
             )
         
+        # Check if student is already enrolled in this course
+        already_enrolled = await conn.fetchval(
+            'SELECT 1 FROM "Student_Section" WHERE student_id = $1 AND course_code = $2', 
+            student_id, assignment.course_code
+        )
+        if already_enrolled:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Student is already enrolled in course '{assignment.course_code}'. Cannot enroll in multiple sections of the same course."
+            )
+        
         try:
-            record= await conn.fetchrow(sql, student_id, assignment.course_code, assignment.sec_number)
-            return StudentSection.model_validate(dict(record))
+            # Use transaction to ensure both operations succeed
+            async with conn.transaction():
+                # 1. Insert student into section
+                record = await conn.fetchrow(sql, student_id, assignment.course_code, assignment.sec_number)
+                
+                # 2. Get student's preferred anonymous name
+                student_info = await conn.fetchrow(
+                    'SELECT preferred_anonymous_name FROM "Student" WHERE user_id = $1',
+                    student_id
+                )
+                anonymous_name = student_info['preferred_anonymous_name'] if student_info else None
+                
+                # 3. Create leaderboard entry for this course
+                leaderboard_sql = """
+                    INSERT INTO "Leaderboard" (student_id, course_code, total_points, is_anonymous, anonymous_name)
+                    VALUES ($1, $2, 100, FALSE, $3)
+                    ON CONFLICT (course_code, student_id) DO NOTHING
+                """
+                await conn.execute(leaderboard_sql, student_id, assignment.course_code, anonymous_name)
+                
+                return StudentSection.model_validate(dict(record))
         except asyncpg.exceptions.UniqueViolationError:
             raise HTTPException(status_code=400, detail="Student is already enrolled in this section.")
         except asyncpg.exceptions.ForeignKeyViolationError:
@@ -863,3 +914,270 @@ async def get_all_student_announcements(student_id: int):
             return []
         
         return [Announcement.model_validate(dict(record)) for record in records]
+
+@app.get("/students/{student_id}/tasks", response_model=List[StudentTask])
+async def get_student_tasks(student_id: int):
+    """Get all tasks (todos) for a specific student with related announcement details"""
+    async with DatabasePool.acquire() as conn:
+        # First check if student exists
+        student_exists = await conn.fetchval('SELECT 1 FROM "Student" WHERE user_id = $1', student_id)
+        if not student_exists:
+            raise HTTPException(status_code=404, detail=f"Student with ID {student_id} not found.")
+        
+        # Get all todos for this student with related announcement details
+        tasks_sql = """
+            SELECT 
+                t.todo_id,
+                t.title,
+                t.status,
+                t.due_date,
+                t.related_announcement,
+                a.title as announcement_title,
+                a.content as announcement_content,
+                a.type as announcement_type,
+                a.deadline as announcement_deadline,
+                a.section_course_code as course_code,
+                a.section_sec_number as section_number
+            FROM "Todo" t
+            LEFT JOIN "Announcement" a ON t.related_announcement = a.announcement_id
+            WHERE t.user_id = $1
+            ORDER BY t.due_date ASC NULLS LAST, t.todo_id DESC;
+        """
+        
+        records = await conn.fetch(tasks_sql, student_id)
+        
+        if not records:
+            return []
+        
+        # Convert records to StudentTask objects
+        tasks = []
+        for record in records:
+            task_data = {
+                "todo_id": record['todo_id'],
+                "title": record['title'],
+                "status": record['status'],
+                "due_date": record['due_date'],
+                "related_announcement_id": record['related_announcement'],
+                "announcement_title": record['announcement_title'],
+                "announcement_content": record['announcement_content'],
+                "announcement_type": record['announcement_type'],
+                "announcement_deadline": record['announcement_deadline'],
+                "course_code": record['course_code'],
+                "section_number": record['section_number']
+            }
+            tasks.append(StudentTask(**task_data))
+        
+        return tasks
+
+@app.post("/students/{student_id}/tasks", response_model=StudentTask, status_code=status.HTTP_201_CREATED)
+async def create_student_task(
+    student_id: int,
+    task: StudentTaskCreate,
+    authenticated_student_id: int = Depends(RoleChecker(["student"]))
+):
+    """Create a new personal task for a student"""
+    # Verify that the authenticated student is creating a task for themselves
+    if authenticated_student_id != student_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only create tasks for yourself."
+        )
+    
+    async with DatabasePool.acquire() as conn:
+        # Verify student exists
+        student_exists = await conn.fetchval('SELECT 1 FROM "Student" WHERE user_id = $1', student_id)
+        if not student_exists:
+            raise HTTPException(status_code=404, detail=f"Student with ID {student_id} not found.")
+        
+        # Create the task
+        create_task_sql = """
+            INSERT INTO "Todo" (user_id, title, status, due_date, related_announcement)
+            VALUES ($1, $2, 'pending', $3, NULL)
+            RETURNING todo_id, title, status, due_date, related_announcement;
+        """
+        
+        try:
+            record = await conn.fetchrow(
+                create_task_sql,
+                student_id,
+                task.title,
+                task.due_date
+            )
+            
+            # Return the created task with all fields (announcement fields will be null)
+            task_data = {
+                "todo_id": record['todo_id'],
+                "title": record['title'],
+                "status": record['status'],
+                "due_date": record['due_date'],
+                "related_announcement_id": record['related_announcement'],
+                "announcement_title": None,
+                "announcement_content": None,
+                "announcement_type": None,
+                "announcement_deadline": None,
+                "course_code": None,
+                "section_number": None
+            }
+            
+            return StudentTask(**task_data)
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to create task: {e}")
+
+@app.patch("/students/{student_id}/tasks/{todo_id}", response_model=StudentTask)
+async def update_student_task_status(
+    student_id: int,
+    todo_id: int,
+    status_update: StudentTaskStatusUpdate,
+    authenticated_student_id: int = Depends(RoleChecker(["student"]))
+):
+    """Update the status of a student's task with complex business logic"""
+    # Verify that the authenticated student is updating their own task
+    if authenticated_student_id != student_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only update your own tasks."
+        )
+    
+    async with DatabasePool.acquire() as conn:
+        # Get the current task with announcement details
+        task_sql = """
+            SELECT 
+                t.todo_id,
+                t.title,
+                t.status,
+                t.due_date,
+                t.related_announcement,
+                a.title as announcement_title,
+                a.content as announcement_content,
+                a.type as announcement_type,
+                a.deadline as announcement_deadline,
+                a.section_course_code as course_code,
+                a.section_sec_number as section_number
+            FROM "Todo" t
+            LEFT JOIN "Announcement" a ON t.related_announcement = a.announcement_id
+            WHERE t.user_id = $1 AND t.todo_id = $2
+        """
+        
+        task_record = await conn.fetchrow(task_sql, student_id, todo_id)
+        if not task_record:
+            raise HTTPException(status_code=404, detail="Task not found.")
+        
+        current_status = task_record['status']
+        new_status = status_update.status
+        announcement_type = task_record['announcement_type']
+        due_date = task_record['due_date']
+        announcement_deadline = task_record['announcement_deadline']
+        
+        # Validate new status
+        if new_status not in ['pending', 'completed', 'delayed']:
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid status. Must be 'pending', 'completed', or 'delayed'."
+            )
+        
+        # Check if deadline has passed
+        from datetime import datetime, date
+        current_date = date.today()
+        deadline_passed = False
+        
+        if due_date and due_date < current_date:
+            deadline_passed = True
+        elif announcement_deadline and announcement_deadline.date() < current_date:
+            deadline_passed = True
+        
+        # Apply business logic based on task type
+        if announcement_type == 'quiz':
+            # Quiz tasks: Cannot be manually updated by students at all
+            raise HTTPException(
+                status_code=403,
+                detail="Quiz tasks cannot be manually updated. They are automatically completed when the deadline passes."
+            )
+        
+        elif announcement_type == 'assignment':
+            # Assignment tasks: Can be completed only once, cannot be reverted
+            if current_status == 'completed':
+                raise HTTPException(
+                    status_code=403,
+                    detail="Assignment tasks cannot be changed once completed."
+                )
+            elif new_status == 'pending' and current_status == 'completed':
+                raise HTTPException(
+                    status_code=403,
+                    detail="Assignment tasks cannot be reverted to pending once completed."
+                )
+            # For assignments, respect user's exact status choice (no auto-conversion)
+        
+        else:
+            ...
+            # Personal tasks (no announcement_type) or general announcements
+            # Can toggle freely, respect user's exact status choice (no auto-conversion)
+        
+        # Update the task status
+        update_sql = """
+            UPDATE "Todo" 
+            SET status = $1 
+            WHERE user_id = $2 AND todo_id = $3
+            RETURNING todo_id, title, status, due_date, related_announcement;
+        """
+        
+        try:
+            updated_record = await conn.fetchrow(update_sql, new_status, student_id, todo_id)
+            
+            # Return the updated task with all fields
+            task_data = {
+                "todo_id": updated_record['todo_id'],
+                "title": updated_record['title'],
+                "status": updated_record['status'],
+                "due_date": updated_record['due_date'],
+                "related_announcement_id": updated_record['related_announcement'],
+                "announcement_title": task_record['announcement_title'],
+                "announcement_content": task_record['announcement_content'],
+                "announcement_type": task_record['announcement_type'],
+                "announcement_deadline": task_record['announcement_deadline'],
+                "course_code": task_record['course_code'],
+                "section_number": task_record['section_number']
+            }
+            
+            return StudentTask(**task_data)
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update task status: {e}")
+
+async def auto_update_quiz_statuses():
+    """Automatically update quiz task statuses when deadlines pass"""
+    if not DatabasePool:
+        print("Database pool not available for auto-update")
+        return
+    
+    try:
+        async with DatabasePool.acquire() as conn:
+            # Find all pending quiz tasks where deadline has passed
+            expired_quiz_sql = """
+                SELECT t.todo_id, t.user_id, a.title as quiz_title, a.deadline
+                FROM "Todo" t
+                JOIN "Announcement" a ON t.related_announcement = a.announcement_id
+                WHERE a.type = 'quiz' 
+                AND t.status = 'pending'
+                AND a.deadline < NOW()
+            """
+            
+            expired_quizzes = await conn.fetch(expired_quiz_sql)
+            
+            if expired_quizzes:
+                # Update all expired quiz tasks to completed
+                for quiz in expired_quizzes:
+                    await conn.execute(
+                        'UPDATE "Todo" SET status = $1 WHERE todo_id = $2 AND user_id = $3',
+                        'completed', quiz['todo_id'], quiz['user_id']
+                    )
+                
+                print(f"🔄 Auto-updated {len(expired_quizzes)} expired quiz tasks to completed status")
+                for quiz in expired_quizzes:
+                    print(f"   - Quiz: {quiz['quiz_title']} (Deadline: {quiz['deadline']})")
+            else:
+                print("✅ No expired quiz tasks found")
+                
+    except Exception as e:
+        print(f"❌ Error in auto-update quiz statuses: {e}")
+        
