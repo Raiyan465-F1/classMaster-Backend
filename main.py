@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
-from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate
+from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate, LeaderboardEntry, AnonymityToggle
 from typing import List
 
 # ======= SetUp ======= 
@@ -1028,6 +1028,143 @@ async def update_student_task_status(
             
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to update task status: {e}")
+
+
+@app.get("/leaderboard/{course_code}", response_model=List[LeaderboardEntry])
+async def get_course_leaderboard(course_code: str):
+    """Get leaderboard for a specific course with proper anonymous name handling"""
+    async with DatabasePool.acquire() as conn:
+        # First check if course exists
+        course_exists = await conn.fetchval('SELECT 1 FROM "Course" WHERE course_code = $1', course_code)
+        if not course_exists:
+            raise HTTPException(status_code=404, detail=f"Course '{course_code}' not found.")
+        
+        # Get leaderboard entries with proper name handling
+        leaderboard_sql = """
+            SELECT 
+                l.student_id,
+                l.total_points,
+                l.is_anonymous,
+                l.last_updated,
+                CASE 
+                    WHEN l.is_anonymous = TRUE THEN l.anonymous_name
+                    ELSE u.name
+                END as display_name
+            FROM "Leaderboard" l
+            JOIN "User" u ON l.student_id = u.user_id
+            WHERE l.course_code = $1
+            ORDER BY l.total_points DESC, l.last_updated ASC
+        """
+        
+        records = await conn.fetch(leaderboard_sql, course_code)
+        
+        if not records:
+            raise HTTPException(status_code=404, detail=f"No leaderboard entries found for course '{course_code}'.")
+        
+        # Convert records to LeaderboardEntry objects
+        leaderboard_entries = []
+        for record in records:
+            entry_data = {
+                "display_name": record['display_name'],
+                "total_points": record['total_points'],
+                "is_anonymous": record['is_anonymous'],
+                "last_updated": record['last_updated']
+            }
+            leaderboard_entries.append(LeaderboardEntry(**entry_data))
+        
+        return leaderboard_entries
+
+@app.patch("/students/{student_id}/leaderboard/{course_code}/anonymity")
+async def toggle_leaderboard_anonymity(
+    student_id: int,
+    course_code: str,
+    anonymity_request: AnonymityToggle,
+    authenticated_student_id: int = Depends(RoleChecker(["student"]))
+):
+    """Toggle anonymity status for a student in a specific course leaderboard"""
+    # Verify that the authenticated student is updating their own anonymity
+    if authenticated_student_id != student_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only update your own anonymity settings."
+        )
+    
+    async with DatabasePool.acquire() as conn:
+        # Check if student is enrolled in this course
+        enrollment_exists = await conn.fetchval(
+            'SELECT 1 FROM "Student_Section" WHERE student_id = $1 AND course_code = $2',
+            student_id, course_code
+        )
+        if not enrollment_exists:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Student is not enrolled in course '{course_code}'."
+            )
+        
+        # Check if leaderboard entry exists
+        leaderboard_exists = await conn.fetchval(
+            'SELECT 1 FROM "Leaderboard" WHERE student_id = $1 AND course_code = $2',
+            student_id, course_code
+        )
+        if not leaderboard_exists:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No leaderboard entry found for student in course '{course_code}'."
+            )
+        
+        # Get student's preferred anonymous name if they want to be anonymous
+        anonymous_name = None
+        if anonymity_request.is_anonymous:
+            student_info = await conn.fetchrow(
+                'SELECT preferred_anonymous_name FROM "Student" WHERE user_id = $1',
+                student_id
+            )
+            anonymous_name = student_info['preferred_anonymous_name'] if student_info else None
+            
+            # If no preferred anonymous name is set, use a default
+            if not anonymous_name:
+                anonymous_name = "Anonymous Student"
+        
+        # Update anonymity status
+        update_sql = """
+            UPDATE "Leaderboard" 
+            SET is_anonymous = $1, anonymous_name = $2, last_updated = NOW()
+            WHERE student_id = $3 AND course_code = $4
+            RETURNING student_id, total_points, is_anonymous, anonymous_name, last_updated;
+        """
+        
+        try:
+            record = await conn.fetchrow(
+                update_sql, 
+                anonymity_request.is_anonymous, 
+                anonymous_name, 
+                student_id, 
+                course_code
+            )
+            
+            # Get the display name for response
+            display_name = anonymous_name if anonymity_request.is_anonymous else None
+            if not display_name:
+                user_info = await conn.fetchrow(
+                    'SELECT name FROM "User" WHERE user_id = $1',
+                    student_id
+                )
+                display_name = user_info['name'] if user_info else "Unknown"
+            
+            return {
+                "message": f"Anonymity status updated successfully for course '{course_code}'",
+                "student_id": record['student_id'],
+                "course_code": course_code,
+                "display_name": display_name,
+                "is_anonymous": record['is_anonymous'],
+                "total_points": record['total_points'],
+                "last_updated": record['last_updated']
+            }
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update anonymity status: {e}")
+
+
 
 async def auto_update_quiz_statuses():
     """Automatically update quiz task statuses when deadlines pass"""

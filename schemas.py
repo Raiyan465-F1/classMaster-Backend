@@ -161,3 +161,26 @@ class StudentTask(BaseModel):
     
     class Config:
         from_attributes = True
+        
+        
+class LeaderboardEntry(BaseModel):
+    """Schema for leaderboard entry response"""
+    display_name: str  # Real name or anonymous name based on is_anonymous
+    total_points: int
+    is_anonymous: bool
+    last_updated: datetime.datetime
+    
+    class Config:
+        from_attributes = True
+        
+        
+class AnonymityToggle(BaseModel):
+    """Schema for toggling anonymity in leaderboard"""
+    is_anonymous: bool = Field(..., description="Set to true to be anonymous, false to show real name")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "is_anonymous": True
+            }
+        }
