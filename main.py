@@ -400,9 +400,39 @@ async def assign_student_to_section(assignment:StudentSectionAssign, student_id:
                 detail="Cannot enroll in this section. No faculty has been assigned to teach this section yet."
             )
         
+        # Check if student is already enrolled in this course
+        already_enrolled = await conn.fetchval(
+            'SELECT 1 FROM "Student_Section" WHERE student_id = $1 AND course_code = $2', 
+            student_id, assignment.course_code
+        )
+        if already_enrolled:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Student is already enrolled in course '{assignment.course_code}'. Cannot enroll in multiple sections of the same course."
+            )
+        
         try:
-            record= await conn.fetchrow(sql, student_id, assignment.course_code, assignment.sec_number)
-            return StudentSection.model_validate(dict(record))
+            # Use transaction to ensure both operations succeed
+            async with conn.transaction():
+                # 1. Insert student into section
+                record = await conn.fetchrow(sql, student_id, assignment.course_code, assignment.sec_number)
+                
+                # 2. Get student's preferred anonymous name
+                student_info = await conn.fetchrow(
+                    'SELECT preferred_anonymous_name FROM "Student" WHERE user_id = $1',
+                    student_id
+                )
+                anonymous_name = student_info['preferred_anonymous_name'] if student_info else None
+                
+                # 3. Create leaderboard entry for this course
+                leaderboard_sql = """
+                    INSERT INTO "Leaderboard" (student_id, course_code, total_points, is_anonymous, anonymous_name)
+                    VALUES ($1, $2, 100, FALSE, $3)
+                    ON CONFLICT (course_code, student_id) DO NOTHING
+                """
+                await conn.execute(leaderboard_sql, student_id, assignment.course_code, anonymous_name)
+                
+                return StudentSection.model_validate(dict(record))
         except asyncpg.exceptions.UniqueViolationError:
             raise HTTPException(status_code=400, detail="Student is already enrolled in this section.")
         except asyncpg.exceptions.ForeignKeyViolationError:
