@@ -69,6 +69,7 @@ class SectionCreate(SectionBase):
 
 class Section(SectionBase):
     course_code: str
+    grades_publicly_visible: bool
     class config:
         from_attributes= True
 class CourseBase(BaseModel):
@@ -117,6 +118,32 @@ class AnnouncementCreate(BaseModel):
     title: str = Field(..., max_length=255)
     content: str
     type: AnnouncementType = Field(..., description="Type of announcement: quiz, assignment, or general")
+
+class Grade(BaseModel):
+    student_id: int
+    course_code: str
+    sec_number: int
+    grade_type: str
+    marks: float
+
+class GradeCreate(BaseModel):
+    student_id: int
+    grade_type: str = Field(...,max_length=100)
+    marks: float
+
+class PublicGradeEntry(BaseModel):
+    student_id: int
+    student_name: str
+    grade_type: str
+    marks: float
+
+class GradeDetail(BaseModel):
+    grade_type: str
+    marks: float
+
+class StudentGradeSummary(BaseModel):
+    total_marks: float
+    grades: List[GradeDetail]
     course_code: str = Field(..., max_length=8, description="Course code for the section")
     sec_number: int = Field(..., description="Section number")
     deadline: Optional[datetime.datetime] = Field(None, description="Deadline for quiz/assignment (optional for general announcements)")
