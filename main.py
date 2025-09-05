@@ -1164,6 +1164,67 @@ async def toggle_leaderboard_anonymity(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to update anonymity status: {e}")
 
+@app.get("/students/{student_id}/leaderboard/{course_code}/anonymity")
+async def get_leaderboard_anonymity_status(
+    student_id: int,
+    course_code: str,
+    authenticated_student_id: int = Depends(RoleChecker(["student"]))
+):
+    """Get anonymity status for a student in a specific course leaderboard"""
+    # Verify that the authenticated student is checking their own anonymity
+    if authenticated_student_id != student_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only check your own anonymity settings."
+        )
+    
+    async with DatabasePool.acquire() as conn:
+        # Check if student is enrolled in this course
+        enrollment_exists = await conn.fetchval(
+            'SELECT 1 FROM "Student_Section" WHERE student_id = $1 AND course_code = $2',
+            student_id, course_code
+        )
+        if not enrollment_exists:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Student is not enrolled in course '{course_code}'."
+            )
+        
+        # Get leaderboard entry with anonymity status
+        leaderboard_sql = """
+            SELECT 
+                l.student_id,
+                l.total_points,
+                l.is_anonymous,
+                l.anonymous_name,
+                l.last_updated,
+                u.name as real_name
+            FROM "Leaderboard" l
+            JOIN "User" u ON l.student_id = u.user_id
+            WHERE l.student_id = $1 AND l.course_code = $2
+        """
+        
+        record = await conn.fetchrow(leaderboard_sql, student_id, course_code)
+        if not record:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No leaderboard entry found for student in course '{course_code}'."
+            )
+        
+        # Determine display name based on anonymity status
+        display_name = record['anonymous_name'] if record['is_anonymous'] else record['real_name']
+        
+        return {
+            "student_id": record['student_id'],
+            "course_code": course_code,
+            "display_name": display_name,
+            "is_anonymous": record['is_anonymous'],
+            "anonymous_name": record['anonymous_name'],
+            "real_name": record['real_name'],
+            "total_points": record['total_points'],
+            "last_updated": record['last_updated']
+        }
+
 
 
 async def auto_update_quiz_statuses():
