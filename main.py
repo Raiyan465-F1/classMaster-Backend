@@ -50,6 +50,7 @@ async def background_quiz_updater():
 async def startup_event():
     """This function will run once when the application starts."""
     global DatabasePool
+    
     print("Info :    Entering the world of NeonDB... ")
     DatabasePool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
     print("INFO :    Welcome to the World of NeonDB. Connection successful.")
@@ -63,8 +64,8 @@ async def startup_event():
 async def shutdown_event():
     """This function will run once when the application shuts down."""
     if DatabasePool:
-        print("INFO:   Disconnecting the World...  ")
-        await DatabasePool.close()
+            print("INFO:   Disconnecting the World...  ")
+            await DatabasePool.close()
 
 
 async def upsert_admin():
@@ -942,15 +943,11 @@ async def update_student_task_status(
         
         # Apply business logic based on task type
         if announcement_type == 'quiz':
-            # Quiz tasks: Cannot be manually updated, auto-completed when deadline passes
-            if deadline_passed and current_status == 'pending':
-                # Auto-complete quiz when deadline passes
-                new_status = 'completed'
-            else:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Quiz tasks cannot be manually updated. They are automatically completed when the deadline passes."
-                )
+            # Quiz tasks: Cannot be manually updated by students at all
+            raise HTTPException(
+                status_code=403,
+                detail="Quiz tasks cannot be manually updated. They are automatically completed when the deadline passes."
+            )
         
         elif announcement_type == 'assignment':
             # Assignment tasks: Can be completed only once, cannot be reverted
@@ -964,15 +961,12 @@ async def update_student_task_status(
                     status_code=403,
                     detail="Assignment tasks cannot be reverted to pending once completed."
                 )
-            elif deadline_passed and new_status == 'completed':
-                # Allow completion even if deadline passed, but mark as delayed
-                new_status = 'delayed'
+            # For assignments, respect user's exact status choice (no auto-conversion)
         
         else:
+            ...
             # Personal tasks (no announcement_type) or general announcements
-            # Can toggle freely, but mark as delayed if deadline passed
-            if deadline_passed and new_status == 'completed':
-                new_status = 'delayed'
+            # Can toggle freely, respect user's exact status choice (no auto-conversion)
         
         # Update the task status
         update_sql = """
@@ -1041,3 +1035,4 @@ async def auto_update_quiz_statuses():
                 
     except Exception as e:
         print(f"❌ Error in auto-update quiz statuses: {e}")
+        
