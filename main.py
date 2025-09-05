@@ -8,12 +8,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, Depends, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
-from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate
+# from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate
 from schemas import (
     User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, 
     FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, 
     AnnouncementCreate, Announcement, Grade, GradeCreate, PublicGradeEntry,
-    StudentGradeSummary, GradeDetail
+    StudentGradeSummary, GradeDetail, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate
 )
 from typing import List
 
@@ -549,7 +549,7 @@ async def get_announcements_for_section(
 
 #======= Faculty Routes for Grades =========
 
-@app.post('/sections/{course_code}/{sec_number}/grades', response_model=Grade, status_code=status.HTTP_201_CREATED)
+@app.post('/sections/{course_code}/{sec_number}/single_student_grades', response_model=Grade, status_code=status.HTTP_201_CREATED)
 async def upsert_single_grade(course_code: str, sec_number: int, grade: GradeCreate, faculty_id: int= Depends(RoleChecker(["faculty"]))):
     async with DatabasePool.acquire() as conn:
         is_assigned= await conn.fetchval('SELECT 1 FROM "Faculty_Section" WHERE faculty_id = $1 AND course_code = $2 AND sec_number = $3', faculty_id, course_code, sec_number)
