@@ -2,6 +2,7 @@ import os
 import asyncpg
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -1009,6 +1010,30 @@ async def update_student_task_status(
         try:
             updated_record = await conn.fetchrow(update_sql, new_status, student_id, todo_id)
             
+            # Award points if task is being completed and it's an assignment
+            points_awarded = 0
+            if (new_status == 'completed' and 
+                announcement_type == 'assignment' and 
+                task_record['course_code'] and 
+                (announcement_deadline or due_date)):
+                
+                # Use announcement deadline if available, otherwise use task due_date
+                from datetime import date
+                task_deadline = announcement_deadline if announcement_deadline else datetime.combine(due_date, datetime.min.time())
+                completion_time = datetime.now(timezone.utc)
+                
+                # Calculate points using hybrid scoring system
+                points_awarded = await calculate_assignment_points(
+                    student_id, 
+                    task_record['course_code'], 
+                    task_deadline, 
+                    completion_time
+                )
+                
+                # Update leaderboard with points
+                if points_awarded > 0:
+                    await update_leaderboard_points(student_id, task_record['course_code'], points_awarded)
+            
             # Return the updated task with all fields
             task_data = {
                 "todo_id": updated_record['todo_id'],
@@ -1024,10 +1049,101 @@ async def update_student_task_status(
                 "section_number": task_record['section_number']
             }
             
-            return StudentTask(**task_data)
+            # Create response data
+            response_data = StudentTask(**task_data)
+            
+            # Add points information to response if points were awarded
+            if points_awarded > 0:
+                # Convert to dict to add points_awarded field
+                response_dict = response_data.model_dump()
+                response_dict['points_awarded'] = points_awarded
+                return response_dict
+            
+            return response_data
             
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to update task status: {e}")
+
+# ======= Scoring System Functions =======
+
+async def calculate_assignment_points(student_id: int, course_code: str, task_deadline: datetime, completion_time: datetime) -> int:
+    """Calculate points for assignment completion using hybrid scoring system"""
+    # Base points
+    base_points = 100
+    
+    # Calculate time difference
+    time_diff = completion_time - task_deadline
+    hours_diff = time_diff.total_seconds() / 3600
+    
+    # Early bonus calculation
+    early_bonus = 0
+    if hours_diff < 0:  # Completed before deadline
+        early_hours = abs(hours_diff)
+        early_bonus = min(early_hours * 3, 72)  # Max 72 points for 24 hours early
+    
+    # Late penalty calculation
+    late_penalty = 0
+    if hours_diff > 0:  # Completed after deadline
+        late_hours = hours_diff
+        late_penalty = min(late_hours * 10, 100)  # Max 100 points penalty
+    
+    # Calculate total points before competitive bonus
+    total_points = base_points + early_bonus - late_penalty
+    
+    # Get competitive bonus
+    competitive_bonus = await calculate_competitive_bonus(student_id, course_code, total_points)
+    
+    # Final points
+    final_points = total_points + competitive_bonus
+    
+    return max(final_points, 0)  # Ensure points don't go below 0
+
+async def calculate_competitive_bonus(student_id: int, course_code: str, current_points: int) -> int:
+    """Calculate competitive bonus based on ranking in course"""
+    async with DatabasePool.acquire() as conn:
+        # Get all students' points in this course
+        points_sql = """
+            SELECT student_id, total_points 
+            FROM "Leaderboard" 
+            WHERE course_code = $1 
+            ORDER BY total_points DESC
+        """
+        students = await conn.fetch(points_sql, course_code)
+        
+        if len(students) < 2:
+            return 0  # No competitive bonus if less than 2 students
+        
+        # Find current student's rank
+        current_rank = None
+        for i, student in enumerate(students):
+            if student['student_id'] == student_id:
+                current_rank = i + 1
+                break
+        
+        if current_rank is None:
+            return 0  # Student not found in leaderboard
+        
+        total_students = len(students)
+        
+        # Calculate competitive bonus based on percentile
+        percentile = (total_students - current_rank + 1) / total_students * 100
+        
+        if percentile >= 75:  # Top 25%
+            return 25
+        elif percentile >= 50:  # Next 25%
+            return 15
+        else:
+            return 0
+
+async def update_leaderboard_points(student_id: int, course_code: str, points_to_add: int):
+    """Update student's points in leaderboard"""
+    async with DatabasePool.acquire() as conn:
+        update_sql = """
+            UPDATE "Leaderboard" 
+            SET total_points = total_points + $1, last_updated = NOW()
+            WHERE student_id = $2 AND course_code = $3
+        """
+        await conn.execute(update_sql, points_to_add, student_id, course_code)
 
 
 @app.get("/leaderboard/{course_code}", response_model=List[LeaderboardEntry])
