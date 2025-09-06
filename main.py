@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
-from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate, LeaderboardEntry, AnonymityToggle, StudentDashboard
+from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate, FacultyTask, FacultyTaskCreate, FacultyTaskStatusUpdate, LeaderboardEntry, AnonymityToggle, StudentDashboard
 from typing import List
 
 # ======= SetUp ======= 
@@ -499,7 +499,7 @@ async def create_announcement_for_section(
                     announcement.deadline
                 )
                 
-                # 2. If it's a quiz or assignment, create todos for all students in that section
+                # 2. If it's a quiz or assignment, create todos for all students AND faculty in that section
                 if announcement.type in ['quiz', 'assignment']:
                     # Get all students enrolled in this section
                     students_sql = """
@@ -522,6 +522,20 @@ async def create_announcement_for_section(
                             announcement.deadline.date() if announcement.deadline else None,
                             announcement_record['announcement_id']
                         )
+                    
+                    # Create todo for the faculty member who created the announcement
+                    faculty_todo_sql = """
+                        INSERT INTO "Todo" (user_id, title, status, due_date, related_announcement)
+                        VALUES ($1, $2, $3, $4, $5)
+                    """
+                    await conn.execute(
+                        faculty_todo_sql,
+                        faculty_id,
+                        f"{announcement.type.title()}: {announcement.title}",
+                        'pending',
+                        announcement.deadline.date() if announcement.deadline else None,
+                        announcement_record['announcement_id']
+                    )
                 
                 return Announcement.model_validate(dict(announcement_record))
                 
@@ -638,6 +652,16 @@ async def update_announcement(
                                 announcement_update.deadline.date() if announcement_update.deadline else None,
                                 announcement_id
                             )
+                        
+                        # Create todo for the faculty member who created the announcement
+                        await conn.execute(
+                            'INSERT INTO "Todo" (user_id, title, status, due_date, related_announcement) VALUES ($1, $2, $3, $4, $5)',
+                            faculty_id,
+                            f"{announcement_update.type.title()}: {announcement_update.title}",
+                            'pending',
+                            announcement_update.deadline.date() if announcement_update.deadline else None,
+                            announcement_id
+                        )
                 
                 return Announcement.model_validate(dict(updated_announcement))
                 
@@ -1064,6 +1088,216 @@ async def update_student_task_status(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to update task status: {e}")
 
+# ======= Faculty Tasks API =======
+
+@app.get("/faculty/{faculty_id}/tasks", response_model=List[FacultyTask])
+async def get_faculty_tasks(faculty_id: int):
+    """Get all tasks (todos) for a specific faculty member with related announcement details"""
+    async with DatabasePool.acquire() as conn:
+        # First check if faculty exists
+        faculty_exists = await conn.fetchval('SELECT 1 FROM "Faculty" WHERE user_id = $1', faculty_id)
+        if not faculty_exists:
+            raise HTTPException(status_code=404, detail=f"Faculty with ID {faculty_id} not found.")
+        
+        # Get all todos for this faculty with related announcement details
+        tasks_sql = """
+            SELECT 
+                t.todo_id,
+                t.title,
+                t.status,
+                t.due_date,
+                t.related_announcement,
+                a.title as announcement_title,
+                a.content as announcement_content,
+                a.type as announcement_type,
+                a.deadline as announcement_deadline,
+                a.section_course_code as course_code,
+                a.section_sec_number as section_number
+            FROM "Todo" t
+            LEFT JOIN "Announcement" a ON t.related_announcement = a.announcement_id
+            WHERE t.user_id = $1
+            ORDER BY t.due_date ASC NULLS LAST, t.todo_id DESC;
+        """
+        
+        records = await conn.fetch(tasks_sql, faculty_id)
+        
+        if not records:
+            return []
+        
+        # Convert records to FacultyTask objects
+        tasks = []
+        for record in records:
+            task_data = {
+                "todo_id": record['todo_id'],
+                "title": record['title'],
+                "status": record['status'],
+                "due_date": record['due_date'],
+                "related_announcement_id": record['related_announcement'],
+                "announcement_title": record['announcement_title'],
+                "announcement_content": record['announcement_content'],
+                "announcement_type": record['announcement_type'],
+                "announcement_deadline": record['announcement_deadline'],
+                "course_code": record['course_code'],
+                "section_number": record['section_number']
+            }
+            tasks.append(FacultyTask(**task_data))
+        
+        return tasks
+
+@app.post("/faculty/{faculty_id}/tasks", response_model=FacultyTask, status_code=status.HTTP_201_CREATED)
+async def create_faculty_task(
+    faculty_id: int,
+    task: FacultyTaskCreate,
+    authenticated_faculty_id: int = Depends(RoleChecker(["faculty"]))
+):
+    """Create a new personal task for a faculty member"""
+    # Verify that the authenticated faculty is creating a task for themselves
+    if authenticated_faculty_id != faculty_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only create tasks for yourself."
+        )
+    
+    async with DatabasePool.acquire() as conn:
+        # Verify faculty exists
+        faculty_exists = await conn.fetchval('SELECT 1 FROM "Faculty" WHERE user_id = $1', faculty_id)
+        if not faculty_exists:
+            raise HTTPException(status_code=404, detail=f"Faculty with ID {faculty_id} not found.")
+        
+        # Create the task
+        create_task_sql = """
+            INSERT INTO "Todo" (user_id, title, status, due_date, related_announcement)
+            VALUES ($1, $2, 'pending', $3, NULL)
+            RETURNING todo_id, title, status, due_date, related_announcement;
+        """
+        
+        try:
+            record = await conn.fetchrow(
+                create_task_sql,
+                faculty_id,
+                task.title,
+                task.due_date
+            )
+            
+            # Return the created task with all fields (announcement fields will be null)
+            task_data = {
+                "todo_id": record['todo_id'],
+                "title": record['title'],
+                "status": record['status'],
+                "due_date": record['due_date'],
+                "related_announcement_id": record['related_announcement'],
+                "announcement_title": None,
+                "announcement_content": None,
+                "announcement_type": None,
+                "announcement_deadline": None,
+                "course_code": None,
+                "section_number": None
+            }
+            
+            return FacultyTask(**task_data)
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to create task: {e}")
+
+@app.patch("/faculty/{faculty_id}/tasks/{todo_id}", response_model=FacultyTask)
+async def update_faculty_task_status(
+    faculty_id: int,
+    todo_id: int,
+    status_update: FacultyTaskStatusUpdate,
+    authenticated_faculty_id: int = Depends(RoleChecker(["faculty"]))
+):
+    """Update the status of a faculty member's task with complex business logic"""
+    # Verify that the authenticated faculty is updating their own task
+    if authenticated_faculty_id != faculty_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only update your own tasks."
+        )
+    
+    async with DatabasePool.acquire() as conn:
+        # Get the current task with announcement details
+        task_sql = """
+            SELECT 
+                t.todo_id,
+                t.title,
+                t.status,
+                t.due_date,
+                t.related_announcement,
+                a.title as announcement_title,
+                a.content as announcement_content,
+                a.type as announcement_type,
+                a.deadline as announcement_deadline,
+                a.section_course_code as course_code,
+                a.section_sec_number as section_number
+            FROM "Todo" t
+            LEFT JOIN "Announcement" a ON t.related_announcement = a.announcement_id
+            WHERE t.user_id = $1 AND t.todo_id = $2
+        """
+        
+        task_record = await conn.fetchrow(task_sql, faculty_id, todo_id)
+        if not task_record:
+            raise HTTPException(status_code=404, detail="Task not found.")
+        
+        current_status = task_record['status']
+        new_status = status_update.status
+        announcement_type = task_record['announcement_type']
+        
+        # Validate new status
+        if new_status not in ['pending', 'completed', 'delayed']:
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid status. Must be 'pending', 'completed', or 'delayed'."
+            )
+        
+        try:
+            # Start transaction for complex business logic
+            async with conn.transaction():
+                # Update the task status
+                update_sql = """
+                    UPDATE "Todo" 
+                    SET status = $1 
+                    WHERE user_id = $2 AND todo_id = $3
+                    RETURNING todo_id, title, status, due_date, related_announcement;
+                """
+                
+                updated_record = await conn.fetchrow(update_sql, new_status, faculty_id, todo_id)
+                
+                # Complex business logic: If updating quiz or assignment task (regardless of current status)
+                if announcement_type in ['quiz', 'assignment'] and new_status in ['completed', 'delayed']:
+                    # Create a new "check + {title}" task
+                    check_task_title = f"Check {task_record['title']}"
+                    check_task_sql = """
+                        INSERT INTO "Todo" (user_id, title, status, due_date, related_announcement)
+                        VALUES ($1, $2, 'pending', NULL, NULL)
+                        RETURNING todo_id, title, status, due_date, related_announcement;
+                    """
+                    
+                    check_task_record = await conn.fetchrow(
+                        check_task_sql,
+                        faculty_id,
+                        check_task_title
+                    )
+                
+                # Return the updated task with all fields
+                task_data = {
+                    "todo_id": updated_record['todo_id'],
+                    "title": updated_record['title'],
+                    "status": updated_record['status'],
+                    "due_date": updated_record['due_date'],
+                    "related_announcement_id": updated_record['related_announcement'],
+                    "announcement_title": task_record['announcement_title'],
+                    "announcement_content": task_record['announcement_content'],
+                    "announcement_type": task_record['announcement_type'],
+                    "announcement_deadline": task_record['announcement_deadline'],
+                    "course_code": task_record['course_code'],
+                    "section_number": task_record['section_number']
+                }
+                
+                return FacultyTask(**task_data)
+                
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update task status: {e}")
+
 # ======= Scoring System Functions =======
 
 async def calculate_assignment_points(student_id: int, course_code: str, task_deadline: datetime, completion_time: datetime) -> int:
@@ -1159,45 +1393,6 @@ async def update_leaderboard_points(student_id: int, course_code: str, points_to
             WHERE student_id = $2 AND course_code = $3
         """
         await conn.execute(update_sql, points_to_add, student_id, course_code)
-
-@app.get("/debug/leaderboard/{course_code}")
-async def debug_leaderboard(course_code: str):
-    """Debug endpoint to see leaderboard details"""
-    async with DatabasePool.acquire() as conn:
-        # Get leaderboard with student details
-        debug_sql = """
-            SELECT 
-                l.student_id,
-                l.total_points,
-                l.is_anonymous,
-                l.last_updated,
-                u.name as real_name,
-                s.preferred_anonymous_name
-            FROM "Leaderboard" l
-            JOIN "User" u ON l.student_id = u.user_id
-            LEFT JOIN "Student" s ON l.student_id = s.user_id
-            WHERE l.course_code = $1
-            ORDER BY l.total_points DESC
-        """
-        
-        records = await conn.fetch(debug_sql, course_code)
-        
-        return {
-            "course_code": course_code,
-            "total_students": len(records),
-            "leaderboard": [
-                {
-                    "student_id": record['student_id'],
-                    "real_name": record['real_name'],
-                    "anonymous_name": record['preferred_anonymous_name'],
-                    "total_points": record['total_points'],
-                    "is_anonymous": record['is_anonymous'],
-                    "last_updated": record['last_updated']
-                }
-                for record in records
-            ]
-        }
-
 
 @app.get("/leaderboard/{course_code}", response_model=List[LeaderboardEntry])
 async def get_course_leaderboard(course_code: str):

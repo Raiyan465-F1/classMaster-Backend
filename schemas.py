@@ -186,6 +186,48 @@ class AnonymityToggle(BaseModel):
             }
         }
 
+class FacultyTaskCreate(BaseModel):
+    """Schema for creating a new faculty task"""
+    title: str = Field(..., min_length=1, max_length=255, description="Task title")
+    due_date: Optional[datetime.date] = Field(None, description="Due date for the task (optional)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "title": "Prepare lecture slides for Chapter 5",
+                "due_date": "2024-01-15"
+            }
+        }
+
+class FacultyTaskStatusUpdate(BaseModel):
+    """Schema for updating faculty task status"""
+    status: str = Field(..., description="New status: pending, completed, or delayed")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "completed"
+            }
+        }
+
+class FacultyTask(BaseModel):
+    """Schema for faculty task response including todo and related announcement details"""
+    todo_id: int
+    title: str
+    status: str
+    due_date: Optional[datetime.date] = None
+    due_date_display: Optional[str] = None
+    related_announcement_id: Optional[int] = None
+    announcement_title: Optional[str] = None
+    announcement_content: Optional[str] = None
+    announcement_type: Optional[str] = None
+    announcement_deadline: Optional[datetime.datetime] = None
+    course_code: Optional[str] = None
+    section_number: Optional[int] = None
+    
+    class Config:
+        from_attributes = True
+
 class StudentDashboard(BaseModel):
     """Schema for student dashboard response"""
     student_id: int
