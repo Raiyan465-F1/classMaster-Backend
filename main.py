@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
-from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate, FacultyTask, FacultyTaskCreate, FacultyTaskStatusUpdate, LeaderboardEntry, AnonymityToggle, StudentDashboard
+from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate, FacultyTask, FacultyTaskCreate, FacultyTaskStatusUpdate, LeaderboardEntry, AnonymityToggle, StudentDashboard, FacultyDashboard
 from typing import List
 
 # ======= SetUp ======= 
@@ -1793,7 +1793,306 @@ async def get_student_dashboard(
         
         return StudentDashboard(**dashboard_data)
 
+# ======= Faculty Dashboard API =======
 
+@app.get("/faculty/{faculty_id}/dashboard", response_model=FacultyDashboard)
+async def get_faculty_dashboard(
+    faculty_id: int,
+    authenticated_faculty_id: int = Depends(RoleChecker(["faculty"]))
+):
+    """Get comprehensive faculty dashboard with all required information"""
+    # Verify that the authenticated faculty is accessing their own dashboard
+    if authenticated_faculty_id != faculty_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only access your own dashboard."
+        )
+    
+    async with DatabasePool.acquire() as conn:
+        # Check if faculty exists
+        faculty_exists = await conn.fetchval('SELECT 1 FROM "Faculty" WHERE user_id = $1', faculty_id)
+        if not faculty_exists:
+            raise HTTPException(status_code=404, detail=f"Faculty with ID {faculty_id} not found.")
+        
+        # Get current date and calculate week boundaries
+        from datetime import date, timedelta
+        today = date.today()
+        start_of_week = today - timedelta(days=today.weekday())  # Monday
+        end_of_week = start_of_week + timedelta(days=6)  # Sunday
+        
+        # 1. Get pending tasks (todos with status 'pending')
+        pending_tasks_sql = """
+            SELECT 
+                t.todo_id,
+                t.title,
+                t.status,
+                t.due_date,
+                t.related_announcement,
+                a.title as announcement_title,
+                a.content as announcement_content,
+                a.type as announcement_type,
+                a.deadline as announcement_deadline,
+                a.section_course_code as course_code,
+                a.section_sec_number as section_number
+            FROM "Todo" t
+            LEFT JOIN "Announcement" a ON t.related_announcement = a.announcement_id
+            WHERE t.user_id = $1 
+            AND t.status = 'pending'
+            ORDER BY t.due_date ASC NULLS LAST, t.todo_id DESC;
+        """
+        
+        pending_tasks_records = await conn.fetch(pending_tasks_sql, faculty_id)
+        pending_tasks = []
+        for record in pending_tasks_records:
+            task_data = {
+                "todo_id": record['todo_id'],
+                "title": record['title'],
+                "status": record['status'],
+                "due_date": record['due_date'],
+                "related_announcement_id": record['related_announcement'],
+                "announcement_title": record['announcement_title'],
+                "announcement_content": record['announcement_content'],
+                "announcement_type": record['announcement_type'],
+                "announcement_deadline": record['announcement_deadline'],
+                "course_code": record['course_code'],
+                "section_number": record['section_number']
+            }
+            pending_tasks.append(FacultyTask(**task_data))
+        
+        # 2. Get courses teaching with section details
+        courses_teaching_sql = """
+            SELECT 
+                fs.course_code,
+                fs.sec_number,
+                c.course_name,
+                s.start_time,
+                s.end_time,
+                s.day_of_week,
+                s.location
+            FROM "Faculty_Section" fs
+            JOIN "Course" c ON fs.course_code = c.course_code
+            JOIN "Section" s ON fs.course_code = s.course_code AND fs.sec_number = s.sec_number
+            WHERE fs.faculty_id = $1
+            ORDER BY c.course_name, fs.sec_number;
+        """
+        
+        courses_teaching_records = await conn.fetch(courses_teaching_sql, faculty_id)
+        courses_teaching = []
+        for record in courses_teaching_records:
+            courses_teaching.append({
+                "course_code": record['course_code'],
+                "course_name": record['course_name'],
+                "sec_number": record['sec_number'],
+                "start_time": str(record['start_time']),
+                "end_time": str(record['end_time']),
+                "day_of_week": record['day_of_week'],
+                "location": record['location']
+            })
+        
+        # 3. Calculate total students across all sections
+        total_students_sql = """
+            SELECT COUNT(DISTINCT ss.student_id) as total_students
+            FROM "Faculty_Section" fs
+            JOIN "Student_Section" ss ON fs.course_code = ss.course_code AND fs.sec_number = ss.sec_number
+            WHERE fs.faculty_id = $1
+        """
+        
+        total_students_result = await conn.fetchrow(total_students_sql, faculty_id)
+        total_students = total_students_result['total_students'] if total_students_result else 0
+        
+        # 4. Calculate hours this week
+        hours_this_week_sql = """
+            SELECT 
+                EXTRACT(EPOCH FROM (s.end_time - s.start_time)) / 3600 as class_duration_hours
+            FROM "Faculty_Section" fs
+            JOIN "Section" s ON fs.course_code = s.course_code AND fs.sec_number = s.sec_number
+            WHERE fs.faculty_id = $1
+            AND s.day_of_week IN ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+        """
+        
+        hours_records = await conn.fetch(hours_this_week_sql, faculty_id)
+        hours_this_week = sum(float(record['class_duration_hours']) for record in hours_records)
+        
+        # 5. Get today's class schedule
+        todays_schedule_sql = """
+            SELECT 
+                s.course_code,
+                s.sec_number,
+                c.course_name,
+                s.start_time,
+                s.end_time,
+                s.day_of_week,
+                s.location
+            FROM "Faculty_Section" fs
+            JOIN "Section" s ON fs.course_code = s.course_code AND fs.sec_number = s.sec_number
+            JOIN "Course" c ON s.course_code = c.course_code
+            WHERE fs.faculty_id = $1
+            AND s.day_of_week = $2
+            ORDER BY s.start_time;
+        """
+        
+        # Get today's day of week
+        days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        today_day = days[today.weekday()]
+        
+        todays_schedule_records = await conn.fetch(todays_schedule_sql, faculty_id, today_day)
+        todays_schedule = []
+        for record in todays_schedule_records:
+            todays_schedule.append({
+                "course_code": record['course_code'],
+                "course_name": record['course_name'],
+                "sec_number": record['sec_number'],
+                "start_time": str(record['start_time']),
+                "end_time": str(record['end_time']),
+                "day_of_week": record['day_of_week'],
+                "location": record['location']
+            })
+        
+        # 6. Get today's announcements (announcements from all sections this faculty teaches)
+        # Use date range to handle timezone issues
+        from datetime import datetime, timedelta
+        start_of_day = datetime.combine(today, datetime.min.time())
+        end_of_day = datetime.combine(today, datetime.max.time())
+        
+        todays_announcements_sql = """
+            SELECT DISTINCT a.*
+            FROM "Announcement" a
+            JOIN "Faculty_Section" fs ON a.section_course_code = fs.course_code 
+                AND a.section_sec_number = fs.sec_number
+            WHERE fs.faculty_id = $1
+            AND a.created_at >= $2 AND a.created_at <= $3
+            ORDER BY a.created_at DESC;
+        """
+        
+        todays_announcements_records = await conn.fetch(todays_announcements_sql, faculty_id, start_of_day, end_of_day)
+        todays_announcements = [Announcement.model_validate(dict(record)) for record in todays_announcements_records]
+        
+        # 7. Count announcements made today
+        announcements_count_today = len(todays_announcements)
+        
+        # Create dashboard response
+        dashboard_data = {
+            "faculty_id": faculty_id,
+            "pending_tasks": pending_tasks,
+            "courses_teaching": courses_teaching,
+            "total_students": total_students,
+            "hours_this_week": hours_this_week,
+            "todays_schedule": todays_schedule,
+            "todays_announcements": todays_announcements,
+            "announcements_count_today": announcements_count_today
+        }
+        
+        return FacultyDashboard(**dashboard_data)
+
+@app.get("/faculty/{faculty_id}/todays-classes")
+async def get_faculty_todays_classes(
+    faculty_id: int,
+    authenticated_faculty_id: int = Depends(RoleChecker(["faculty"]))
+):
+    """Get today's class schedule for a specific faculty member"""
+    # Verify that the authenticated faculty is accessing their own schedule
+    if authenticated_faculty_id != faculty_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only access your own schedule."
+        )
+    
+    async with DatabasePool.acquire() as conn:
+        # Check if faculty exists
+        faculty_exists = await conn.fetchval('SELECT 1 FROM "Faculty" WHERE user_id = $1', faculty_id)
+        if not faculty_exists:
+            raise HTTPException(status_code=404, detail=f"Faculty with ID {faculty_id} not found.")
+        
+        # Get current date
+        from datetime import date
+        today = date.today()
+        
+        # Get today's class schedule
+        todays_schedule_sql = """
+            SELECT 
+                s.course_code,
+                s.sec_number,
+                c.course_name,
+                s.start_time,
+                s.end_time,
+                s.day_of_week,
+                s.location
+            FROM "Faculty_Section" fs
+            JOIN "Section" s ON fs.course_code = s.course_code AND fs.sec_number = s.sec_number
+            JOIN "Course" c ON s.course_code = c.course_code
+            WHERE fs.faculty_id = $1
+            AND s.day_of_week = $2
+            ORDER BY s.start_time;
+        """
+        
+        # Get today's day of week
+        days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        today_day = days[today.weekday()]
+        
+        todays_schedule_records = await conn.fetch(todays_schedule_sql, faculty_id, today_day)
+        todays_schedule = []
+        for record in todays_schedule_records:
+            todays_schedule.append({
+                "course_code": record['course_code'],
+                "course_name": record['course_name'],
+                "sec_number": record['sec_number'],
+                "start_time": str(record['start_time']),
+                "end_time": str(record['end_time']),
+                "day_of_week": record['day_of_week'],
+                "location": record['location']
+            })
+        
+        return {
+            "faculty_id": faculty_id,
+            "date": today.isoformat(),
+            "day_of_week": today_day,
+            "classes": todays_schedule,
+            "total_classes": len(todays_schedule)
+        }
+
+@app.get("/faculty/{faculty_id}/recent-announcements", response_model=List[Announcement])
+async def get_faculty_recent_announcements(
+    faculty_id: int,
+    authenticated_faculty_id: int = Depends(RoleChecker(["faculty"]))
+):
+    """Get today's announcements from all sections taught by a specific faculty member"""
+    # Verify that the authenticated faculty is accessing their own announcements
+    if authenticated_faculty_id != faculty_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only access your own announcements."
+        )
+    
+    async with DatabasePool.acquire() as conn:
+        # Check if faculty exists
+        faculty_exists = await conn.fetchval('SELECT 1 FROM "Faculty" WHERE user_id = $1', faculty_id)
+        if not faculty_exists:
+            raise HTTPException(status_code=404, detail=f"Faculty with ID {faculty_id} not found.")
+        
+        # Get current date
+        from datetime import date
+        today = date.today()
+        
+        # Get today's announcements (announcements from all sections this faculty teaches)
+        # Use date range to handle timezone issues
+        from datetime import datetime, timedelta
+        start_of_day = datetime.combine(today, datetime.min.time())
+        end_of_day = datetime.combine(today, datetime.max.time())
+        
+        todays_announcements_sql = """
+            SELECT DISTINCT a.*
+            FROM "Announcement" a
+            JOIN "Faculty_Section" fs ON a.section_course_code = fs.course_code 
+                AND a.section_sec_number = fs.sec_number
+            WHERE fs.faculty_id = $1
+            AND a.created_at >= $2 AND a.created_at <= $3
+            ORDER BY a.created_at DESC;
+        """
+        
+        todays_announcements_records = await conn.fetch(todays_announcements_sql, faculty_id, start_of_day, end_of_day)
+        todays_announcements = [Announcement.model_validate(dict(record)) for record in todays_announcements_records]
+        
+        return todays_announcements
 
 async def auto_update_quiz_statuses():
     """Automatically update quiz task statuses when deadlines pass"""

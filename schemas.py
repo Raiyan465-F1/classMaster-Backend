@@ -240,3 +240,17 @@ class StudentDashboard(BaseModel):
     
     class Config:
         from_attributes = True
+
+class FacultyDashboard(BaseModel):
+    """Schema for faculty dashboard response"""
+    faculty_id: int
+    pending_tasks: List[FacultyTask]
+    courses_teaching: List[dict]  # Course info with section details
+    total_students: int
+    hours_this_week: float
+    todays_schedule: List[dict]  # Today's class schedule
+    todays_announcements: List[Announcement]
+    announcements_count_today: int
+    
+    class Config:
+        from_attributes = True

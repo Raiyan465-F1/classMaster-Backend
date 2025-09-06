@@ -332,3 +332,240 @@ Error responses include a `detail` field with a human-readable error message.
      "status": "completed"
    }
    ```
+
+## Faculty Dashboard API
+
+The faculty dashboard provides comprehensive information for faculty members in a single API call. This endpoint consolidates all faculty-related data including tasks, courses, schedules, announcements, and statistics.
+
+### Get Faculty Dashboard (Comprehensive)
+
+**Endpoint**: `GET /faculty/{faculty_id}/dashboard`
+
+**Headers**: `X-User-ID: {faculty_id}`
+
+**Response**:
+
+```json
+{
+  "faculty_id": 2,
+  "pending_tasks": [
+    {
+      "todo_id": 1,
+      "title": "Quiz: Midterm Exam",
+      "status": "pending",
+      "due_date": "2024-01-15",
+      "related_announcement_id": 1,
+      "announcement_title": "Midterm Exam",
+      "announcement_content": "Complete the midterm exam",
+      "announcement_type": "quiz",
+      "announcement_deadline": "2024-01-15T23:59:59",
+      "course_code": "CS101",
+      "section_number": 1
+    }
+  ],
+  "courses_teaching": [
+    {
+      "course_code": "CS101",
+      "course_name": "Introduction to Computer Science",
+      "sec_number": 1,
+      "start_time": "09:00:00",
+      "end_time": "10:30:00",
+      "day_of_week": "Monday",
+      "location": "Room 101"
+    }
+  ],
+  "total_students": 25,
+  "hours_this_week": 6.0,
+  "todays_schedule": [
+    {
+      "course_code": "CS101",
+      "course_name": "Introduction to Computer Science",
+      "sec_number": 1,
+      "start_time": "09:00:00",
+      "end_time": "10:30:00",
+      "day_of_week": "Monday",
+      "location": "Room 101"
+    }
+  ],
+  "todays_announcements": [
+    {
+      "announcement_id": 1,
+      "title": "Midterm Exam",
+      "content": "Complete the midterm exam",
+      "created_at": "2024-01-15T08:00:00",
+      "type": "quiz",
+      "section_course_code": "CS101",
+      "section_sec_number": 1,
+      "faculty_id": 2,
+      "deadline": "2024-01-15T23:59:59"
+    }
+  ],
+  "announcements_count_today": 1,
+  "all_tasks": [
+    {
+      "todo_id": 1,
+      "title": "Quiz: Midterm Exam",
+      "status": "pending",
+      "due_date": "2024-01-15",
+      "related_announcement_id": 1,
+      "announcement_title": "Midterm Exam",
+      "announcement_content": "Complete the midterm exam",
+      "announcement_type": "quiz",
+      "announcement_deadline": "2024-01-15T23:59:59",
+      "course_code": "CS101",
+      "section_number": 1
+    },
+    {
+      "todo_id": 2,
+      "title": "Assignment: Lab Report",
+      "status": "completed",
+      "due_date": "2024-01-10",
+      "related_announcement_id": 2,
+      "announcement_title": "Lab Report Due",
+      "announcement_content": "Submit your lab report",
+      "announcement_type": "assignment",
+      "announcement_deadline": "2024-01-10T23:59:59",
+      "course_code": "CS101",
+      "section_number": 1
+    }
+  ],
+  "total_courses": 2,
+  "total_sections": 3,
+  "weekly_schedule": {
+    "Monday": [
+      {
+        "course_code": "CS101",
+        "course_name": "Introduction to Computer Science",
+        "sec_number": 1,
+        "start_time": "09:00:00",
+        "end_time": "10:30:00",
+        "day_of_week": "Monday",
+        "location": "Room 101"
+      }
+    ],
+    "Tuesday": [],
+    "Wednesday": [
+      {
+        "course_code": "CS102",
+        "course_name": "Data Structures",
+        "sec_number": 1,
+        "start_time": "14:00:00",
+        "end_time": "15:30:00",
+        "day_of_week": "Wednesday",
+        "location": "Room 102"
+      }
+    ],
+    "Thursday": [],
+    "Friday": [],
+    "Saturday": [],
+    "Sunday": []
+  },
+  "recent_announcements_all": [
+    {
+      "announcement_id": 1,
+      "title": "Midterm Exam",
+      "content": "Complete the midterm exam",
+      "created_at": "2024-01-15T08:00:00",
+      "type": "quiz",
+      "section_course_code": "CS101",
+      "section_sec_number": 1,
+      "faculty_id": 2,
+      "deadline": "2024-01-15T23:59:59"
+    },
+    {
+      "announcement_id": 2,
+      "title": "Lab Report Due",
+      "content": "Submit your lab report",
+      "created_at": "2024-01-10T10:00:00",
+      "type": "assignment",
+      "section_course_code": "CS101",
+      "section_sec_number": 1,
+      "faculty_id": 2,
+      "deadline": "2024-01-10T23:59:59"
+    }
+  ],
+  "task_statistics": {
+    "total_tasks": 5,
+    "pending_tasks": 2,
+    "completed_tasks": 2,
+    "delayed_tasks": 1,
+    "completion_rate": 40.0
+  }
+}
+```
+
+### Faculty Dashboard Features (All-in-One)
+
+This single endpoint provides comprehensive faculty information:
+
+1. **Pending Tasks**: All tasks with 'pending' status
+2. **All Tasks**: Complete task list with all statuses (pending, completed, delayed)
+3. **Courses Teaching**: All courses and sections assigned to the faculty
+4. **Total Students**: Count of unique students across all sections
+5. **Hours This Week**: Total teaching hours calculated from class durations
+6. **Today's Schedule**: Classes scheduled for today
+7. **Weekly Schedule**: Complete weekly schedule organized by day
+8. **Today's Announcements**: Announcements made by faculty today
+9. **Recent Announcements**: All announcements made in the last 7 days
+10. **Task Statistics**: Comprehensive task completion statistics
+11. **Course Statistics**: Total courses and sections count
+
+### Get Today's Classes
+
+**Endpoint**: `GET /faculty/{faculty_id}/todays-classes`
+
+**Headers**: `X-User-ID: {faculty_id}`
+
+**Response**:
+
+```json
+{
+  "faculty_id": 2,
+  "date": "2024-01-15",
+  "day_of_week": "Monday",
+  "classes": [
+    {
+      "course_code": "CS101",
+      "course_name": "Introduction to Computer Science",
+      "sec_number": 1,
+      "start_time": "09:00:00",
+      "end_time": "10:30:00",
+      "day_of_week": "Monday",
+      "location": "Room 101"
+    }
+  ],
+  "total_classes": 1
+}
+```
+
+### Get Recent Announcements
+
+**Endpoint**: `GET /faculty/{faculty_id}/recent-announcements`
+
+**Headers**: `X-User-ID: {faculty_id}`
+
+**Response**:
+
+```json
+[
+  {
+    "announcement_id": 1,
+    "title": "Midterm Exam",
+    "content": "Complete the midterm exam",
+    "created_at": "2024-01-15T08:00:00",
+    "type": "quiz",
+    "section_course_code": "CS101",
+    "section_sec_number": 1,
+    "faculty_id": 2,
+    "deadline": "2024-01-15T23:59:59"
+  }
+]
+```
+
+### Task Management
+
+Faculty can use these existing task management endpoints:
+
+- `GET /faculty/{faculty_id}/tasks` - Get all tasks
+- `POST /faculty/{faculty_id}/tasks` - Create new task
+- `PATCH /faculty/{faculty_id}/tasks/{todo_id}` - Update task status
