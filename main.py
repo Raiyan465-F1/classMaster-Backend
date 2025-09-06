@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
-from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate, LeaderboardEntry, AnonymityToggle
+from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate, LeaderboardEntry, AnonymityToggle, StudentDashboard
 from typing import List
 
 # ======= SetUp ======= 
@@ -1393,6 +1393,210 @@ async def get_leaderboard_anonymity_status(
             "total_points": record['total_points'],
             "last_updated": record['last_updated']
         }
+
+# ======= Student Dashboard API =======
+
+@app.get("/students/{student_id}/dashboard", response_model=StudentDashboard)
+async def get_student_dashboard(
+    student_id: int,
+    authenticated_student_id: int = Depends(RoleChecker(["student"]))
+):
+    """Get comprehensive student dashboard with all required information"""
+    # Verify that the authenticated student is accessing their own dashboard
+    if authenticated_student_id != student_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only access your own dashboard."
+        )
+    
+    async with DatabasePool.acquire() as conn:
+        # Check if student exists
+        student_exists = await conn.fetchval('SELECT 1 FROM "Student" WHERE user_id = $1', student_id)
+        if not student_exists:
+            raise HTTPException(status_code=404, detail=f"Student with ID {student_id} not found.")
+        
+        # Get current date and tomorrow's date
+        from datetime import date, timedelta
+        today = date.today()
+        tomorrow = today + timedelta(days=1)
+        
+        # 1. Get pending tasks (todos without course code or null announcement id)
+        pending_tasks_sql = """
+            SELECT 
+                t.todo_id,
+                t.title,
+                t.status,
+                t.due_date,
+                t.related_announcement,
+                a.title as announcement_title,
+                a.content as announcement_content,
+                a.type as announcement_type,
+                a.deadline as announcement_deadline,
+                a.section_course_code as course_code,
+                a.section_sec_number as section_number
+            FROM "Todo" t
+            LEFT JOIN "Announcement" a ON t.related_announcement = a.announcement_id
+            WHERE t.user_id = $1 
+            AND t.status = 'pending'
+            AND (a.section_course_code IS NULL OR t.related_announcement IS NULL)
+            ORDER BY t.due_date ASC NULLS LAST, t.todo_id DESC;
+        """
+        
+        pending_tasks_records = await conn.fetch(pending_tasks_sql, student_id)
+        pending_tasks = []
+        for record in pending_tasks_records:
+            task_data = {
+                "todo_id": record['todo_id'],
+                "title": record['title'],
+                "status": record['status'],
+                "due_date": record['due_date'],
+                "related_announcement_id": record['related_announcement'],
+                "announcement_title": record['announcement_title'],
+                "announcement_content": record['announcement_content'],
+                "announcement_type": record['announcement_type'],
+                "announcement_deadline": record['announcement_deadline'],
+                "course_code": record['course_code'],
+                "section_number": record['section_number']
+            }
+            pending_tasks.append(StudentTask(**task_data))
+        
+        # 2. Get tasks due tomorrow
+        tasks_due_tomorrow_sql = """
+            SELECT 
+                t.todo_id,
+                t.title,
+                t.status,
+                t.due_date,
+                t.related_announcement,
+                a.title as announcement_title,
+                a.content as announcement_content,
+                a.type as announcement_type,
+                a.deadline as announcement_deadline,
+                a.section_course_code as course_code,
+                a.section_sec_number as section_number
+            FROM "Todo" t
+            LEFT JOIN "Announcement" a ON t.related_announcement = a.announcement_id
+            WHERE t.user_id = $1 
+            AND t.status = 'pending'
+            AND (
+                t.due_date = $2 
+                OR (a.deadline IS NOT NULL AND DATE(a.deadline) = $2)
+            )
+            ORDER BY t.due_date ASC NULLS LAST, t.todo_id DESC;
+        """
+        
+        tasks_due_tomorrow_records = await conn.fetch(tasks_due_tomorrow_sql, student_id, tomorrow)
+        tasks_due_tomorrow = []
+        for record in tasks_due_tomorrow_records:
+            task_data = {
+                "todo_id": record['todo_id'],
+                "title": record['title'],
+                "status": record['status'],
+                "due_date": record['due_date'],
+                "related_announcement_id": record['related_announcement'],
+                "announcement_title": record['announcement_title'],
+                "announcement_content": record['announcement_content'],
+                "announcement_type": record['announcement_type'],
+                "announcement_deadline": record['announcement_deadline'],
+                "course_code": record['course_code'],
+                "section_number": record['section_number']
+            }
+            tasks_due_tomorrow.append(StudentTask(**task_data))
+        
+        # 3. Get enrolled courses with section details
+        enrolled_courses_sql = """
+            SELECT 
+                ss.course_code,
+                ss.sec_number,
+                c.course_name,
+                s.start_time,
+                s.end_time,
+                s.day_of_week,
+                s.location
+            FROM "Student_Section" ss
+            JOIN "Course" c ON ss.course_code = c.course_code
+            JOIN "Section" s ON ss.course_code = s.course_code AND ss.sec_number = s.sec_number
+            WHERE ss.student_id = $1
+            ORDER BY c.course_name, ss.sec_number;
+        """
+        
+        enrolled_courses_records = await conn.fetch(enrolled_courses_sql, student_id)
+        enrolled_courses = []
+        for record in enrolled_courses_records:
+            enrolled_courses.append({
+                "course_code": record['course_code'],
+                "course_name": record['course_name'],
+                "sec_number": record['sec_number'],
+                "start_time": str(record['start_time']),
+                "end_time": str(record['end_time']),
+                "day_of_week": record['day_of_week'],
+                "location": record['location']
+            })
+        
+        # 4. Get today's class schedule
+        todays_schedule_sql = """
+            SELECT 
+                s.course_code,
+                s.sec_number,
+                c.course_name,
+                s.start_time,
+                s.end_time,
+                s.day_of_week,
+                s.location
+            FROM "Student_Section" ss
+            JOIN "Section" s ON ss.course_code = s.course_code AND ss.sec_number = s.sec_number
+            JOIN "Course" c ON s.course_code = c.course_code
+            WHERE ss.student_id = $1
+            AND s.day_of_week = $2
+            ORDER BY s.start_time;
+        """
+        
+        # Get today's day of week
+        days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        today_day = days[today.weekday()]
+        
+        todays_schedule_records = await conn.fetch(todays_schedule_sql, student_id, today_day)
+        todays_schedule = []
+        for record in todays_schedule_records:
+            todays_schedule.append({
+                "course_code": record['course_code'],
+                "course_name": record['course_name'],
+                "sec_number": record['sec_number'],
+                "start_time": str(record['start_time']),
+                "end_time": str(record['end_time']),
+                "day_of_week": record['day_of_week'],
+                "location": record['location']
+            })
+        
+        # 5. Get today's announcements
+        todays_announcements_sql = """
+            SELECT DISTINCT a.*
+            FROM "Announcement" a
+            JOIN "Student_Section" ss ON a.section_course_code = ss.course_code 
+                AND a.section_sec_number = ss.sec_number
+            WHERE ss.student_id = $1
+            AND DATE(a.created_at) = $2
+            ORDER BY a.created_at DESC;
+        """
+        
+        todays_announcements_records = await conn.fetch(todays_announcements_sql, student_id, today)
+        todays_announcements = [Announcement.model_validate(dict(record)) for record in todays_announcements_records]
+        
+        # 6. Count announcements made today
+        announcements_count_today = len(todays_announcements)
+        
+        # Create dashboard response
+        dashboard_data = {
+            "student_id": student_id,
+            "pending_tasks": pending_tasks,
+            "tasks_due_tomorrow": tasks_due_tomorrow,
+            "enrolled_courses": enrolled_courses,
+            "todays_schedule": todays_schedule,
+            "todays_announcements": todays_announcements,
+            "announcements_count_today": announcements_count_today
+        }
+        
+        return StudentDashboard(**dashboard_data)
 
 
 

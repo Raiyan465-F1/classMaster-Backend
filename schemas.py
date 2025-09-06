@@ -151,6 +151,7 @@ class StudentTask(BaseModel):
     title: str
     status: str
     due_date: Optional[datetime.date] = None
+    due_date_display: Optional[str] = None
     related_announcement_id: Optional[int] = None
     announcement_title: Optional[str] = None
     announcement_content: Optional[str] = None
@@ -184,3 +185,16 @@ class AnonymityToggle(BaseModel):
                 "is_anonymous": True
             }
         }
+
+class StudentDashboard(BaseModel):
+    """Schema for student dashboard response"""
+    student_id: int
+    pending_tasks: List[StudentTask]
+    tasks_due_tomorrow: List[StudentTask]
+    enrolled_courses: List[dict]  # Course info with section details
+    todays_schedule: List[dict]  # Today's class schedule
+    todays_announcements: List[Announcement]
+    announcements_count_today: int
+    
+    class Config:
+        from_attributes = True
