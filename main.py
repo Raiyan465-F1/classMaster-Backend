@@ -1087,19 +1087,19 @@ async def calculate_assignment_points(student_id: int, course_code: str, task_de
         late_hours = hours_diff
         late_penalty = min(late_hours * 10, 100)  # Max 100 points penalty
     
-    # Calculate total points before competitive bonus
-    total_points = base_points + early_bonus - late_penalty
+    # Calculate points for this assignment only (without base points)
+    assignment_points = early_bonus - late_penalty
     
-    # Get competitive bonus
-    competitive_bonus = await calculate_competitive_bonus(student_id, course_code, total_points)
+    # Get competitive bonus (pass only the assignment points)
+    competitive_bonus = await calculate_competitive_bonus(student_id, course_code, assignment_points)
     
-    # Final points
-    final_points = total_points + competitive_bonus
+    # Final points for this assignment
+    final_points = base_points + assignment_points + competitive_bonus
     
     return max(final_points, 0)  # Ensure points don't go below 0
 
-async def calculate_competitive_bonus(student_id: int, course_code: str, current_points: int) -> int:
-    """Calculate competitive bonus based on ranking in course"""
+async def calculate_competitive_bonus(student_id: int, course_code: str, new_points: int) -> int:
+    """Calculate competitive bonus based on ranking in course with new points"""
     async with DatabasePool.acquire() as conn:
         # Get all students' points in this course
         points_sql = """
@@ -1110,25 +1110,40 @@ async def calculate_competitive_bonus(student_id: int, course_code: str, current
         """
         students = await conn.fetch(points_sql, course_code)
         
-        if len(students) < 2:
-            return 0  # No competitive bonus if less than 2 students
+        # Competitive bonus is always available (even for single student)
+        # It's based on the final ranking after adding the assignment points
         
-        # Find current student's rank
-        current_rank = None
-        for i, student in enumerate(students):
+        # Find current student's current points
+        current_student_points = 0
+        for student in students:
             if student['student_id'] == student_id:
-                current_rank = i + 1
+                current_student_points = student['total_points']
                 break
         
-        if current_rank is None:
+        if current_student_points == 0:
             return 0  # Student not found in leaderboard
         
-        total_students = len(students)
+        # Calculate what the student's new total will be after adding new_points
+        # new_points is just the assignment points (early_bonus - late_penalty)
+        # We need to add base points (100) to get the total
+        new_total = current_student_points + 100 + new_points
         
-        # Calculate competitive bonus based on percentile
-        percentile = (total_students - current_rank + 1) / total_students * 100
+        # Create a list of all points including the student's new total
+        all_points = [student['total_points'] for student in students if student['student_id'] != student_id]
+        all_points.append(new_total)
+        all_points.sort(reverse=True)
         
-        if percentile >= 75:  # Top 25%
+        # Find the student's new rank
+        new_rank = all_points.index(new_total) + 1
+        total_students = len(all_points)
+        
+        # Calculate competitive bonus based on new percentile
+        percentile = (total_students - new_rank + 1) / total_students * 100
+        
+        # For single student, they automatically get top 25% bonus
+        if total_students == 1:
+            return 25
+        elif percentile >= 75:  # Top 25%
             return 25
         elif percentile >= 50:  # Next 25%
             return 15
@@ -1144,6 +1159,44 @@ async def update_leaderboard_points(student_id: int, course_code: str, points_to
             WHERE student_id = $2 AND course_code = $3
         """
         await conn.execute(update_sql, points_to_add, student_id, course_code)
+
+@app.get("/debug/leaderboard/{course_code}")
+async def debug_leaderboard(course_code: str):
+    """Debug endpoint to see leaderboard details"""
+    async with DatabasePool.acquire() as conn:
+        # Get leaderboard with student details
+        debug_sql = """
+            SELECT 
+                l.student_id,
+                l.total_points,
+                l.is_anonymous,
+                l.last_updated,
+                u.name as real_name,
+                s.preferred_anonymous_name
+            FROM "Leaderboard" l
+            JOIN "User" u ON l.student_id = u.user_id
+            LEFT JOIN "Student" s ON l.student_id = s.user_id
+            WHERE l.course_code = $1
+            ORDER BY l.total_points DESC
+        """
+        
+        records = await conn.fetch(debug_sql, course_code)
+        
+        return {
+            "course_code": course_code,
+            "total_students": len(records),
+            "leaderboard": [
+                {
+                    "student_id": record['student_id'],
+                    "real_name": record['real_name'],
+                    "anonymous_name": record['preferred_anonymous_name'],
+                    "total_points": record['total_points'],
+                    "is_anonymous": record['is_anonymous'],
+                    "last_updated": record['last_updated']
+                }
+                for record in records
+            ]
+        }
 
 
 @app.get("/leaderboard/{course_code}", response_model=List[LeaderboardEntry])
