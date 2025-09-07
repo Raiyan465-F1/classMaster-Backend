@@ -254,3 +254,26 @@ class FacultyDashboard(BaseModel):
     
     class Config:
         from_attributes = True
+        
+class Grade(BaseModel):
+    student_id: int
+    course_code: str
+    sec_number: int
+    grade_type: str
+    marks: float
+
+class GradeCreate(BaseModel):
+    student_id: int
+    grade_type: str = Field(...,max_length=100)
+    marks: float
+    
+
+class GradeDetail(BaseModel):
+    grade_type: str
+    marks: float
+
+class StudentGradeSummary(BaseModel):
+    total_marks: float
+    grades: List[GradeDetail]
+    course_code: str = Field(..., max_length=8, description="Course code for the section")
+    sec_number: int = Field(..., description="Section number")

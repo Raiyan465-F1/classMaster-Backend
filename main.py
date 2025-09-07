@@ -1,16 +1,20 @@
 import os
+import csv
+import io
 import asyncpg
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status, Depends, Header
+from fastapi import FastAPI, HTTPException, status, Depends, Header, UploadFile, File, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext #for password hashing
-from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate, FacultyTask, FacultyTaskCreate, FacultyTaskStatusUpdate, LeaderboardEntry, AnonymityToggle, StudentDashboard, FacultyDashboard
+from schemas import User, UserCreate, UserLogin, Course, SectionCreate, Section, CourseCreate, FacultySection, FacultySectionAssign, StudentSection, StudentSectionAssign, AnnouncementCreate, Announcement, StudentTask, StudentTaskCreate, StudentTaskStatusUpdate, FacultyTask, FacultyTaskCreate, FacultyTaskStatusUpdate, LeaderboardEntry, AnonymityToggle, StudentDashboard, FacultyDashboard, Grade, GradeCreate, GradeDetail, StudentGradeSummary
 from typing import List
 
 # ======= SetUp ======= 
+
+router = APIRouter()
 
 load_dotenv()
 
@@ -2162,6 +2166,86 @@ async def get_faculty_recent_announcements(
         
         return todays_announcements
 
+#======= Faculty Routes for Grades manual =========
+
+@app.post('/sections/{course_code}/{sec_number}/grades', response_model=Grade, status_code=status.HTTP_201_CREATED)
+async def upsert_single_grade(course_code: str, sec_number: int, grade: GradeCreate, faculty_id: int= Depends(RoleChecker(["faculty"]))):
+    async with DatabasePool.acquire() as conn:
+        is_assigned= await conn.fetchval('SELECT 1 FROM "Faculty_Section" WHERE faculty_id = $1 AND course_code = $2 AND sec_number = $3', faculty_id, course_code, sec_number)
+        if not is_assigned: raise HTTPException(status_code=403, detail= "Faculty not assigned to this section.")
+        is_enrolled= await conn.fetchval('SELECT 1 FROM "Student_Section" WHERE student_id = $1 AND course_code = $2 AND sec_number = $3', grade.student_id, course_code, sec_number)
+        if not is_enrolled: raise HTTPException(status_code=404, detail=f"Student with ID {grade.student_id} is not enrolled in this section.")
+        sql = """
+            INSERT INTO "Grade" (student_id, course_code, sec_number, grade_type, marks) VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (student_id, course_code, sec_number, grade_type) DO UPDATE SET marks = EXCLUDED.marks
+            RETURNING *;
+        """
+        record = await conn.fetchrow(sql, grade.student_id, course_code, sec_number, grade.grade_type, grade.marks)
+        return Grade.model_validate(dict(record))
+
+
+@app.get('/sections/{course_code}/{sec_number}/grades', response_model=List[Grade])
+async def get_all_grades_for_section(course_code: str, sec_number: int, faculty_id: int = Depends(RoleChecker(["faculty"]))):
+    """
+    Get all grades for all students in a specific section.
+    Only faculty assigned to the section can access this endpoint.
+    """
+    async with DatabasePool.acquire() as conn:
+        # Check if faculty is assigned to this section
+        is_assigned = await conn.fetchval('SELECT 1 FROM "Faculty_Section" WHERE faculty_id = $1 AND course_code = $2 AND sec_number = $3', faculty_id, course_code, sec_number)
+        if not is_assigned:
+            raise HTTPException(status_code=403, detail="Faculty not assigned to this section.")
+        
+        # Get all grades for the section
+        sql = 'SELECT * FROM "Grade" WHERE course_code = $1 AND sec_number = $2 ORDER BY student_id, grade_type;'
+        records = await conn.fetch(sql, course_code, sec_number)
+        return [Grade.model_validate(dict(record)) for record in records]
+
+
+#======= student Routes for Grades =========
+
+@app.get("/my-grades/{course_code}/{sec_number}", response_model= List[Grade])
+async def get_my_grades_for_section(course_code: str, sec_number: int, student_id: int = Depends(RoleChecker(["student"]))):
+    sql = 'SELECT * FROM "Grade" WHERE student_id = $1 AND course_code = $2 AND sec_number = $3;'
+    async with DatabasePool.acquire() as conn:
+        records= await conn.fetch(sql, student_id, course_code, sec_number)
+        return [Grade.model_validate(dict(record)) for record in records]
+
+
+
+@app.get("/my-dashboard/{course_code}/{sec_number}", response_model=StudentGradeSummary)
+async def get_student_dash_grade(
+    course_code: str,
+    sec_number: int,
+    student_id: int= Depends(RoleChecker(["student"]))
+):
+    async with DatabasePool.acquire() as conn:
+        is_enrolled= await conn.fetchval('SELECT 1 FROM "Student_Section" WHERE student_id = $1 AND course_code = $2 AND sec_number = $3',
+            student_id, course_code, sec_number)
+        if not is_enrolled:
+            raise HTTPException(status_code=403, detail= "You are not enrolled in this section.")
+        # Query 1: Get all individual grade entries
+        grades_sql = 'SELECT grade_type, marks FROM "Grade" WHERE student_id = $1 AND course_code = $2 AND sec_number = $3;'
+        grade_records = await conn.fetch(grades_sql, student_id, course_code, sec_number)
+        
+        # Query 2: Calculate the sum of marks directly in the database
+        total_sql = 'SELECT SUM(marks) as total FROM "Grade" WHERE student_id = $1 AND course_code = $2 AND sec_number = $3;'
+        total_record = await conn.fetchrow(total_sql, student_id, course_code, sec_number)
+        
+        # If there are no grades, total will be None. Default to 0.
+        total_marks = total_record['total'] if total_record and total_record['total'] is not None else 0.0
+        
+        # Construct the response object
+        grade_details = [GradeDetail.model_validate(dict(record)) for record in grade_records]
+        
+        return StudentGradeSummary(
+            course_code= course_code,
+            sec_number= sec_number,
+            total_marks=total_marks,
+            grades=grade_details
+        )
+
+
 async def auto_update_quiz_statuses():
     """Automatically update quiz task statuses when deadlines pass"""
     if not DatabasePool:
@@ -2198,4 +2282,3 @@ async def auto_update_quiz_statuses():
                 
     except Exception as e:
         print(f"❌ Error in auto-update quiz statuses: {e}")
-        
