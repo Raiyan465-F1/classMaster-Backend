@@ -101,7 +101,8 @@ async def upsert_admin():
 # ======= CORS Middleware ======= 
 
 origin = [
-    "https://classmaster-alpha.vercel.app"
+    "https://classmaster-alpha.vercel.app",
+    "https://classmaster-alpha.vercel.app/",
     "http://localhost:3000",
     "http://localhost",
     "http://127.0.0.1",
