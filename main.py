@@ -180,7 +180,7 @@ async def create_user(user: UserCreate):
     
     # Role-specific table insertion queries
     role_sql_queries = {
-        'student': 'INSERT INTO "Student" (user_id) VALUES ($1)',
+        'student': 'INSERT INTO "Student" (user_id, preferred_anonymous_name) VALUES ($1, $2)',
         'faculty': 'INSERT INTO "Faculty" (user_id) VALUES ($1)',
         'admin': 'INSERT INTO "Admin" (user_id) VALUES ($1)'
     }
@@ -217,7 +217,6 @@ async def create_user(user: UserCreate):
                 new_user_record = await connection.fetchrow(
                     user_sql_query,
                     user.user_id,
-        
                     user.name,
                     user.email,
                     hashed_password,
@@ -228,10 +227,17 @@ async def create_user(user: UserCreate):
                     raise HTTPException(status_code=500, detail= "failed to create user.")
                 
                 # Insert into role-specific table
-                await connection.execute(
-                    role_sql_queries[user.role],
-                    new_user_record['user_id']
-                )
+                if user.role == 'student':
+                    await connection.execute(
+                        role_sql_queries[user.role],
+                        new_user_record['user_id'],
+                        user.preferred_anonymous_name
+                    )
+                else:
+                    await connection.execute(
+                        role_sql_queries[user.role],
+                        new_user_record['user_id']
+                    )
                 
                 return User(
                     user_id=new_user_record['user_id'],
