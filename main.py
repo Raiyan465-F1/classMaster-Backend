@@ -457,6 +457,74 @@ async def get_student_sections(student_id: int):
             raise HTTPException(status_code=404, detail=f"No sections found for student ID {student_id}.")
         return [StudentSection.model_validate(dict(record)) for record in records]
 
+@app.get("/sections/{course_code}/{sec_number}/students", response_model=List[dict])
+async def get_section_students(
+    course_code: str,
+    sec_number: int,
+    faculty_id: int = Depends(RoleChecker(["faculty", "admin"]))
+):
+    """Get all students enrolled in a specific section"""
+    async with DatabasePool.acquire() as conn:
+        # First check if section exists
+        section_exists = await conn.fetchval(
+            'SELECT 1 FROM "Section" WHERE course_code = $1 AND sec_number = $2', 
+            course_code, sec_number
+        )
+        if not section_exists:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Section {sec_number} for course '{course_code}' not found."
+            )
+        
+        # If user is faculty, check if they are assigned to this section
+        if faculty_id != 1:  # Not admin
+            user_role = await conn.fetchval('SELECT role FROM "User" WHERE user_id = $1', faculty_id)
+            if user_role == "faculty":
+                is_assigned = await conn.fetchval(
+                    'SELECT 1 FROM "Faculty_Section" WHERE faculty_id = $1 AND course_code = $2 AND sec_number = $3',
+                    faculty_id, course_code, sec_number
+                )
+                if not is_assigned:
+                    raise HTTPException(
+                        status_code=403, 
+                        detail="You are not assigned to teach this section."
+                    )
+        
+        # Get all students enrolled in this section with their details
+        students_sql = """
+            SELECT 
+                ss.student_id,
+                u.name,
+                u.email,
+                ss.course_code,
+                ss.sec_number
+            FROM "Student_Section" ss
+            JOIN "User" u ON ss.student_id = u.user_id
+            WHERE ss.course_code = $1 AND ss.sec_number = $2
+            ORDER BY u.name;
+        """
+        
+        records = await conn.fetch(students_sql, course_code, sec_number)
+        
+        if not records:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No students found in section {sec_number} of course '{course_code}'."
+            )
+        
+        # Convert records to list of dictionaries
+        students = []
+        for record in records:
+            students.append({
+                "student_id": record['student_id'],
+                "name": record['name'],
+                "email": record['email'],
+                "course_code": record['course_code'],
+                "sec_number": record['sec_number']
+            })
+        
+        return students
+
 #======= Announcement from Faculty-end-creation =========
 
 @app.post("/create-announcement", response_model= Announcement, status_code= status.HTTP_201_CREATED)
